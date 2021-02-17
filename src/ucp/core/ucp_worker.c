@@ -26,6 +26,7 @@
 #include <ucs/datastruct/queue.h>
 #include <ucs/type/cpu_set.h>
 #include <ucs/sys/string.h>
+#include <ucs/vfs/base/vfs_obj.h>
 #include <ucs/arch/atomic.h>
 #include <sys/poll.h>
 #include <sys/eventfd.h>
@@ -2148,6 +2149,8 @@ ucs_status_t ucp_worker_create(ucp_context_h context,
      */
     ucs_config_parser_warn_unused_env_vars_once(context->config.env_prefix);
 
+    ucs_vfs_obj_add_dir(context, worker, "worker/%p", worker);
+
     *worker_p = worker;
     return UCS_OK;
 
@@ -2351,6 +2354,7 @@ void ucp_worker_destroy(ucp_worker_h worker)
     }
     UCS_ASYNC_UNBLOCK(&worker->async);
 
+    ucs_vfs_obj_remove(worker);
     ucp_tag_match_cleanup(&worker->tm);
     ucp_worker_destroy_mpools(worker);
     ucp_worker_destroy_mem_type_endpoints(worker);

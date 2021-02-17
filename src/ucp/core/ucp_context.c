@@ -22,6 +22,7 @@
 #include <ucs/debug/debug.h>
 #include <ucs/sys/compiler.h>
 #include <ucs/sys/string.h>
+#include <ucs/vfs/base/vfs_obj.h>
 #include <string.h>
 
 
@@ -1540,6 +1541,8 @@ ucs_status_t ucp_init_version(unsigned api_major_version, unsigned api_minor_ver
         ucp_config_release(dfl_config);
     }
 
+    ucs_vfs_obj_add_dir(NULL, context, "ucp/context/%p", context);
+
     ucs_debug("created ucp context %p [%d mds %d tls] features 0x%" PRIx64
               " tl bitmap " UCT_TL_BITMAP_FMT,
               context, context->num_mds, context->num_tls,
@@ -1562,6 +1565,7 @@ err:
 
 void ucp_cleanup(ucp_context_h context)
 {
+    ucs_vfs_obj_remove(context);
     ucp_free_resources(context);
     ucp_free_config(context);
     UCP_THREAD_LOCK_FINALIZE(&context->mt_lock);
