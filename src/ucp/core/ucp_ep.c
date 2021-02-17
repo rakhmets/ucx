@@ -30,6 +30,7 @@
 #include <ucs/debug/log.h>
 #include <ucs/sys/string.h>
 #include <ucs/sys/sock.h>
+#include <ucs/vfs/base/vfs_obj.h>
 #include <string.h>
 
 
@@ -82,6 +83,34 @@ void ucp_ep_config_key_reset(ucp_ep_config_key_t *key)
     memset(key->rma_lanes,    UCP_NULL_LANE, sizeof(key->rma_lanes));
     memset(key->rma_bw_lanes, UCP_NULL_LANE, sizeof(key->rma_bw_lanes));
     memset(key->amo_lanes,    UCP_NULL_LANE, sizeof(key->amo_lanes));
+}
+
+static void ucp_ep_vfs_info_show(void *obj, ucs_string_buffer_t *strb)
+{
+    ucp_ep_h ep = obj;
+    char buffer[8192];
+    FILE *f;
+
+    f = fmemopen(buffer, sizeof(buffer), "w");
+    ucp_ep_print_info(ep, f);
+    buffer[ftell(f)] = 0;
+    fclose(f);
+
+    ucs_string_buffer_appendf(strb, "%s", buffer);
+}
+
+static void ucp_ep_vfs_state_show(void *obj, ucs_string_buffer_t *strb)
+{
+    ucp_ep_h ep = obj;
+
+    ucs_string_buffer_appendf(strb, "flags : 0x%x\n", ep->flags);
+}
+
+void ucp_ep_vfs_init(ucp_ep_h ep)
+{
+    ucs_vfs_obj_add_dir(ep->worker, ep, "ep/%p", ep);
+    ucs_vfs_obj_add_ro_file(ep, ucp_ep_vfs_info_show, "info");
+    ucs_vfs_obj_add_ro_file(ep, ucp_ep_vfs_state_show, "state");
 }
 
 ucs_status_t ucp_ep_create_base(ucp_worker_h worker, const char *peer_name,
@@ -142,6 +171,8 @@ ucs_status_t ucp_ep_create_base(ucp_worker_h worker, const char *peer_name,
         goto err_free_ep_control_ext;
     }
 
+    ucs_vfs_obj_set_dirty(worker, ucp_worker_vfs_refresh);
+
     *ep_p = ep;
     ucs_debug("created ep %p to %s %s", ep, ucp_ep_peer_name(ep), message);
     return UCS_OK;
@@ -160,6 +191,7 @@ void ucp_ep_destroy_base(ucp_ep_h ep)
         return;
     }
 
+    ucs_vfs_obj_remove(ep);
     UCS_STATS_NODE_FREE(ep->stats);
     ucs_free(ucp_ep_ext_control(ep));
     ucs_strided_alloc_put(&ep->worker->ep_alloc, ep);

@@ -484,6 +484,8 @@ void ucp_ep_config_cm_lane_info_str(ucp_worker_h worker,
                                     ucp_rsc_index_t cm_index,
                                     char *buf, size_t max);
 
+void ucp_ep_vfs_init(ucp_ep_h ep);
+
 void ucp_ep_config_lane_info_str(ucp_worker_h worker,
                                  const ucp_ep_config_key_t *key,
                                  const unsigned *addr_indices,

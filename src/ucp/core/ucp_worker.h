@@ -339,6 +339,8 @@ void ucp_worker_discard_uct_ep(ucp_ep_h ucp_ep, uct_ep_h uct_ep,
                                uct_pending_purge_callback_t purge_cb,
                                void *purge_arg);
 
+void ucp_worker_vfs_refresh(void *obj);
+
 char *ucp_worker_print_used_tls(const ucp_ep_config_key_t *key,
                                 ucp_context_h context,
                                 ucp_worker_cfg_index_t config_idx, char *info,
