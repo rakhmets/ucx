@@ -17,7 +17,7 @@
 
 
 #define VFS_DEFAULT_MOUNTPOINT_DIR "/tmp/ucx"
-#define VFS_FUSE_MOUNT_PROG        "fusermount3"
+#define VFS_FUSE_MOUNT_PROG        "fusermount"
 
 
 enum {
