@@ -760,6 +760,16 @@ out_unlock:
     return status;
 }
 
+static void ucs_vfs_obj_init_globals()
+{
+    ucs_global_opts_vfs_init();
+}
+
+static void ucs_vfs_obj_cleanup_globals()
+{
+    ucs_global_opts_vfs_cleanup();
+}
+
 UCS_STATIC_INIT
 {
     ucs_spinlock_init(&ucs_vfs_obj_context.lock, 0);
@@ -769,10 +779,14 @@ UCS_STATIC_INIT
     ucs_spin_unlock(&ucs_vfs_obj_context.lock);
     kh_init_inplace(vfs_obj, &ucs_vfs_obj_context.obj_hash);
     kh_init_inplace(vfs_path, &ucs_vfs_obj_context.path_hash);
+
+    ucs_vfs_obj_init_globals();
 }
 
 UCS_STATIC_CLEANUP
 {
+    ucs_vfs_obj_cleanup_globals();
+
     kh_destroy_inplace(vfs_path, &ucs_vfs_obj_context.path_hash);
     kh_destroy_inplace(vfs_obj, &ucs_vfs_obj_context.obj_hash);
     ucs_spinlock_destroy(&ucs_vfs_obj_context.lock);

@@ -147,6 +147,8 @@ ucs_status_t ucs_global_opts_get_value(const char *name, char *value,
 ucs_status_t ucs_global_opts_clone(void *dst);
 void ucs_global_opts_release();
 void ucs_global_opts_print(FILE *stream, ucs_config_print_flags_t print_flags);
+void ucs_global_opts_vfs_init();
+void ucs_global_opts_vfs_cleanup();
 
 END_C_DECLS
 
