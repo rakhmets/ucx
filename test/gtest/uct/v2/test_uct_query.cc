@@ -21,6 +21,41 @@ public:
     }
 };
 
+UCS_TEST_P(test_uct_query, query_overhead)
+{
+    uct_perf_attr_t perf_attr;
+
+    perf_attr.field_mask         = UCT_PERF_ATTR_FIELD_OPERATION |
+                                   UCT_PERF_ATTR_FIELD_LOCAL_MEMORY_TYPE |
+                                   UCT_PERF_ATTR_FIELD_REMOTE_MEMORY_TYPE |
+                                   UCT_PERF_ATTR_FIELD_LOCAL_SYS_DEVICE |
+                                   UCT_PERF_ATTR_FIELD_REMOTE_SYS_DEVICE |
+                                   UCT_PERF_ATTR_FIELD_SEND_PRE_OVERHEAD |
+                                   UCT_PERF_ATTR_FIELD_SEND_POST_OVERHEAD |
+                                   UCT_PERF_ATTR_FIELD_RECV_OVERHEAD;
+    perf_attr.local_memory_type  = UCS_MEMORY_TYPE_HOST;
+    perf_attr.remote_memory_type = UCS_MEMORY_TYPE_HOST;
+    perf_attr.local_sys_device   = UCS_SYS_DEVICE_ID_UNKNOWN;
+    perf_attr.remote_sys_device  = UCS_SYS_DEVICE_ID_UNKNOWN;
+
+    perf_attr.operation = UCT_EP_OP_AM_SHORT;
+    uct_iface_estimate_perf(sender().iface(), &perf_attr);
+
+    UCS_TEST_MESSAGE << "SHORT";
+    UCS_TEST_MESSAGE << "SEND_PRE_OVERHEAD: " << perf_attr.send_pre_overhead;
+    UCS_TEST_MESSAGE << "SEND_POST_OVERHEAD: " << perf_attr.send_post_overhead;
+    UCS_TEST_MESSAGE << "RECV_OVERHEAD: " << perf_attr.recv_overhead;
+
+    perf_attr.operation = UCT_EP_OP_AM_BCOPY;
+    uct_iface_estimate_perf(sender().iface(), &perf_attr);
+
+    UCS_TEST_MESSAGE << "BCOPY";
+    UCS_TEST_MESSAGE << "SEND_PRE_OVERHEAD: " << perf_attr.send_pre_overhead;
+    UCS_TEST_MESSAGE << "SEND_POST_OVERHEAD: " << perf_attr.send_post_overhead;
+    UCS_TEST_MESSAGE << "RECV_OVERHEAD: " << perf_attr.recv_overhead;
+
+}
+
 UCS_TEST_P(test_uct_query, query_perf)
 {
     uct_perf_attr_t perf_attr;

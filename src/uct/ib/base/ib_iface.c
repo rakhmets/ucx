@@ -205,6 +205,24 @@ ucs_config_field_t uct_ib_iface_config_table[] = {
    "Reverse Service level. 'auto' will set the same value of sl\n",
    ucs_offsetof(uct_ib_iface_config_t, reverse_sl), UCS_CONFIG_TYPE_ULUNITS},
 
+  {"SEND_PRE_OVERHEAD", UCS_VALUE_AUTO_STR,
+   "Time spent in the UCT layer to prepare message request and pass it to "
+   "the hardware or system software layers, in seconds, in seconds",
+   ucs_offsetof(uct_ib_iface_config_t, send_pre_overhead),
+   UCS_CONFIG_TYPE_TIME_UNITS},
+
+  {"SEND_POST_OVERHEAD", UCS_VALUE_AUTO_STR,
+   "Time spent in the UCT layer after the message request has been passed to "
+   "the hardware or system software layers and before operation has been "
+   "finalized, in seconds", 0,
+   UCS_CONFIG_TYPE_KEY_VALUE(UCS_CONFIG_TYPE_TIME_UNITS,
+   {"common", "doorbell write effect on CPU operations pipeline",
+    ucs_offsetof(uct_ib_iface_config_t, send_post_overhead_common)},
+   {"zcopy", "completion for every operation",
+    ucs_offsetof(uct_ib_iface_config_t, send_post_overhead_zcopy)},
+   {NULL},
+  )},
+
   {NULL}
 };
 
@@ -1564,6 +1582,10 @@ UCS_CLASS_INIT_FUNC(uct_ib_iface_t, uct_iface_ops_t *tl_ops,
 
     self->addr_size  = uct_ib_iface_address_size(self);
 
+    self->config.send_pre_overhead         = config->send_pre_overhead;
+    self->config.send_post_overhead_common = config->send_post_overhead_common;
+    self->config.send_post_overhead_zcopy  = config->send_post_overhead_zcopy;
+
     ucs_debug("created uct_ib_iface_t headroom_ofs %d payload_ofs %d hdr_ofs %d data_sz %d",
               self->config.rx_headroom_offset, self->config.rx_payload_offset,
               self->config.rx_hdr_offset, self->config.seg_size);
@@ -1752,28 +1774,59 @@ uct_ib_iface_estimate_perf(uct_iface_h iface, uct_perf_attr_t *perf_attr)
     uct_ep_operation_t op  = UCT_ATTR_VALUE(PERF, perf_attr, operation,
                                             OPERATION, UCT_EP_OP_LAST);
     const double wqe_fetch = 350e-9;
+    uct_ib_iface_t *ib_iface = ucs_derived_of(iface, uct_ib_iface_t);
     double send_pre_overhead, send_post_overhead;
     double send_post_overhead_zcopy;
     uct_iface_attr_t iface_attr;
     ucs_status_t status;
+    ucs_cpu_vendor_t cpu_vendor;
 
     status = uct_iface_query(iface, &iface_attr);
     if (status != UCS_OK) {
         return status;
     }
 
-    switch (ucs_arch_get_cpu_vendor()) {
-    case UCS_CPU_VENDOR_FUJITSU_ARM:
-        send_pre_overhead        = 100e-9;
-        send_post_overhead       = 400e-9;
-        send_post_overhead_zcopy = 50e-9;
-        break;
-    default:
-        send_pre_overhead        = iface_attr.overhead;
-        /* Doorbell write effect on CPU operations pipeline */
-        send_post_overhead       = 40e-9;
-        /* Completion for every operation */
-        send_post_overhead_zcopy = 20e-9;
+    cpu_vendor = ucs_arch_get_cpu_vendor();
+
+    if (ib_iface->config.send_pre_overhead != UCS_TIME_AUTO) {
+        send_pre_overhead = ucs_time_to_sec(ib_iface->config.send_pre_overhead);
+    } else {
+        switch (cpu_vendor) {
+            case UCS_CPU_VENDOR_FUJITSU_ARM:
+            send_pre_overhead = 100e-9;
+            break;
+        default:
+            send_pre_overhead = iface_attr.overhead;
+            break;
+        }
+    }
+
+    if (ib_iface->config.send_post_overhead_common != UCS_TIME_AUTO) {
+        send_post_overhead = ucs_time_to_sec(ib_iface->config.send_post_overhead_common);
+    } else {
+        switch (cpu_vendor) {
+        case UCS_CPU_VENDOR_FUJITSU_ARM:
+            send_post_overhead = 400e-9;
+            break;
+        default:
+            /* Doorbell write effect on CPU operations pipeline */
+            send_post_overhead = 40e-9;
+            break;
+        }
+    }
+
+    if (ib_iface->config.send_post_overhead_zcopy != UCS_TIME_AUTO) {
+        send_post_overhead_zcopy = ucs_time_to_sec(ib_iface->config.send_post_overhead_zcopy);
+    } else {
+        switch (cpu_vendor) {
+        case UCS_CPU_VENDOR_FUJITSU_ARM:
+            send_post_overhead_zcopy = 50e-9;
+            break;
+        default:
+            /* Completion for every operation */
+            send_post_overhead_zcopy = 20e-9;
+            break;
+        }
     }
 
     if (perf_attr->field_mask & UCT_PERF_ATTR_FIELD_SEND_PRE_OVERHEAD) {

@@ -59,6 +59,41 @@ static khash_t(ucs_config_map) ucs_config_file_vars            = {0};
 static pthread_mutex_t ucs_config_parser_env_vars_hash_lock    = PTHREAD_MUTEX_INITIALIZER;
 static char ucs_config_parser_negate                           = '^';
 
+static const char *cpu_model_names[] = {
+    [UCS_CPU_MODEL_UNKNOWN]            = "unknown",
+    [UCS_CPU_MODEL_INTEL_IVYBRIDGE]    = "IvyBridge",
+    [UCS_CPU_MODEL_INTEL_SANDYBRIDGE]  = "SandyBridge",
+    [UCS_CPU_MODEL_INTEL_NEHALEM]      = "Nehalem",
+    [UCS_CPU_MODEL_INTEL_WESTMERE]     = "Westmere",
+    [UCS_CPU_MODEL_INTEL_HASWELL]      = "Haswell",
+    [UCS_CPU_MODEL_INTEL_BROADWELL]    = "Broadwell",
+    [UCS_CPU_MODEL_INTEL_SKYLAKE]      = "Skylake",
+    [UCS_CPU_MODEL_INTEL_ICELAKE]      = "Icelake",
+    [UCS_CPU_MODEL_ARM_AARCH64]        = "ARM 64-bit",
+    [UCS_CPU_MODEL_AMD_NAPLES]         = "Naples",
+    [UCS_CPU_MODEL_AMD_ROME]           = "Rome",
+    [UCS_CPU_MODEL_AMD_MILAN]          = "Milan",
+    [UCS_CPU_MODEL_AMD_GENOA]          = "Genoa",
+    [UCS_CPU_MODEL_ZHAOXIN_ZHANGJIANG] = "Zhangjiang",
+    [UCS_CPU_MODEL_ZHAOXIN_WUDAOKOU]   = "Wudaokou",
+    [UCS_CPU_MODEL_ZHAOXIN_LUJIAZUI]   = "Lujiazui",
+    [UCS_CPU_MODEL_RV64G]              = "RV64G",
+    [UCS_CPU_MODEL_NVIDIA_GRACE]       = "Grace"
+};
+
+
+
+static const char* cpu_vendor_names[] = {
+    [UCS_CPU_VENDOR_UNKNOWN]          = "unknown",
+    [UCS_CPU_VENDOR_INTEL]            = "Intel",
+    [UCS_CPU_VENDOR_AMD]              = "AMD",
+    [UCS_CPU_VENDOR_GENERIC_ARM]      = "Generic ARM",
+    [UCS_CPU_VENDOR_GENERIC_PPC]      = "Generic PPC",
+    [UCS_CPU_VENDOR_GENERIC_RV64G]    = "Generic RV64G",
+    [UCS_CPU_VENDOR_FUJITSU_ARM]      = "Fujitsu ARM",
+    [UCS_CPU_VENDOR_ZHAOXIN]          = "Zhaoxin",
+    [UCS_CPU_VENDOR_NVIDIA]           = "Nvidia"
+};
 
 const char *ucs_async_mode_names[] = {
     [UCS_ASYNC_MODE_SIGNAL]          = "signal",
@@ -1677,35 +1712,54 @@ static ucs_status_t ucs_config_parser_get_sub_prefix(const char *env_prefix,
     return UCS_OK;
 }
 
-void ucs_config_parse_config_files()
+static void ucs_config_parse_config_files_common(const char* config_file_name)
 {
     const char *path_p;
     char path[PATH_MAX];
+    char filename[128];
 
     /* System-wide configuration file */
-    ucs_config_parse_config_file(UCX_CONFIG_DIR, UCX_CONFIG_FILE_NAME, 1);
+    ucs_config_parse_config_file(UCX_CONFIG_DIR, config_file_name, 1);
 
     /* Library dir */
     path_p = ucs_sys_get_lib_path();
     if (path_p != NULL) {
         ucs_strncpy_safe(path, path_p, PATH_MAX);
-        ucs_config_parse_config_file(dirname(path), "../etc/" UCX_CONFIG_FILE_NAME, 1);
+        ucs_snprintf_safe(filename, sizeof(filename), "../etc/%s",
+                          config_file_name);
+        ucs_config_parse_config_file(dirname(path), filename, 1);
     }
 
     /* User home dir */
     path_p = getenv("HOME");
     if (path_p != NULL) {
-        ucs_config_parse_config_file(path_p, UCX_CONFIG_FILE_NAME, 1);
+        ucs_config_parse_config_file(path_p, config_file_name, 1);
     }
 
     /* Custom directory for UCX configuration */
     path_p = getenv("UCX_CONFIG_DIR");
     if (path_p != NULL) {
-        ucs_config_parse_config_file(path_p, UCX_CONFIG_FILE_NAME, 1);
+        ucs_config_parse_config_file(path_p, config_file_name, 1);
     }
 
     /* Current working dir */
-    ucs_config_parse_config_file(".", UCX_CONFIG_FILE_NAME, 1);
+    ucs_config_parse_config_file(".", config_file_name, 1);
+}
+
+static void ucs_config_parse_cpu_config_files()
+{
+    char filename[128];
+
+    ucs_snprintf_safe(filename, sizeof(filename), "ucx_%s_%s.cfg",
+                      cpu_vendor_names[ucs_arch_get_cpu_vendor()],
+                      cpu_model_names[ucs_arch_get_cpu_model()]);
+
+    ucs_config_parse_config_files_common(filename);
+}
+
+void ucs_config_parse_config_files()
+{
+    ucs_config_parse_config_files_common(UCX_CONFIG_FILE_NAME);
 }
 
 ucs_status_t
@@ -1730,6 +1784,7 @@ ucs_config_parser_fill_opts(void *opts, ucs_config_global_list_entry_t *entry,
 
     UCS_INIT_ONCE(&config_file_parse) {
         ucs_config_parse_config_files();
+        ucs_config_parse_cpu_config_files();
     }
 
     /* Apply environment variables */

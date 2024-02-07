@@ -67,6 +67,27 @@ ucs_config_field_t uct_mm_iface_config_table[] = {
     {"ERROR_HANDLING", "n", "Expose error handling support capability",
      ucs_offsetof(uct_mm_iface_config_t, error_handling), UCS_CONFIG_TYPE_BOOL},
 
+    {"SEND_PRE_OVERHEAD", UCS_VALUE_AUTO_STR,
+     "Time spent in the UCT layer to prepare message request and pass it to "
+     "the hardware or system software layers, in seconds, in seconds", 0,
+     UCS_CONFIG_TYPE_KEY_VALUE(UCS_CONFIG_TYPE_TIME_UNITS,
+        {"short", "receive overhead for short operation type",
+         ucs_offsetof(uct_mm_iface_config_t, send_pre_overhead_short)},
+        {"bcopy", "receive overhead for bcopy operation type",
+         ucs_offsetof(uct_mm_iface_config_t, send_pre_overhead_bcopy)},
+        {NULL},
+    )},
+
+    {"RECV_OVERHEAD", UCS_VALUE_AUTO_STR,
+     "Message receive overhead time, in seconds", 0,
+     UCS_CONFIG_TYPE_KEY_VALUE(UCS_CONFIG_TYPE_TIME_UNITS,
+        {"short", "receive overhead for short operation type",
+         ucs_offsetof(uct_mm_iface_config_t, recv_overhead_short)},
+        {"bcopy", "receive overhead for bcopy operation type",
+         ucs_offsetof(uct_mm_iface_config_t, recv_overhead_bcopy)},
+        {NULL}
+    )},
+
     {NULL}
 };
 
@@ -538,10 +559,18 @@ uct_mm_estimate_perf(uct_iface_h tl_iface, uct_perf_attr_t *perf_attr)
     if (perf_attr->field_mask & UCT_PERF_ATTR_FIELD_SEND_PRE_OVERHEAD) {
         switch (op) {
         case UCT_EP_OP_AM_SHORT:
-            perf_attr->send_pre_overhead = short_overhead;
+            if (iface->config.send_pre_overhead_short != UCS_TIME_AUTO) {
+                perf_attr->send_pre_overhead = ucs_time_to_sec(iface->config.send_pre_overhead_short);
+            } else {
+                perf_attr->send_pre_overhead = short_overhead;
+            }
             break;
         case UCT_EP_OP_AM_BCOPY:
-            perf_attr->send_pre_overhead = am_overhead;
+            if (iface->config.send_pre_overhead_short != UCS_TIME_AUTO) {
+                perf_attr->send_pre_overhead = ucs_time_to_sec(iface->config.send_pre_overhead_bcopy);
+            } else {
+                perf_attr->send_pre_overhead = am_overhead;
+            }
             break;
         default:
             perf_attr->send_pre_overhead = UCT_MM_IFACE_OVERHEAD;
@@ -552,10 +581,18 @@ uct_mm_estimate_perf(uct_iface_h tl_iface, uct_perf_attr_t *perf_attr)
     if (perf_attr->field_mask & UCT_PERF_ATTR_FIELD_RECV_OVERHEAD) {
         switch (op) {
         case UCT_EP_OP_AM_SHORT:
-            perf_attr->recv_overhead = short_overhead;
+            if (iface->config.recv_overhead_short != UCS_TIME_AUTO) {
+                perf_attr->recv_overhead = ucs_time_to_sec(iface->config.recv_overhead_short);
+            } else {
+                perf_attr->recv_overhead = short_overhead;
+            }
             break;
         case UCT_EP_OP_AM_BCOPY:
-            perf_attr->recv_overhead = am_overhead;
+            if (iface->config.recv_overhead_short != UCS_TIME_AUTO) {
+                perf_attr->recv_overhead = ucs_time_to_sec(iface->config.recv_overhead_bcopy);
+            } else {
+                perf_attr->recv_overhead = am_overhead;
+            }
             break;
         default:
             perf_attr->recv_overhead = UCT_MM_IFACE_OVERHEAD;
@@ -756,6 +793,11 @@ static UCS_CLASS_INIT_FUNC(uct_mm_iface_t, uct_md_h md, uct_worker_h worker,
         status = UCS_ERR_INVALID_PARAM;
         goto err;
     }
+
+    self->config.send_pre_overhead_short = mm_config->send_pre_overhead_short;
+    self->config.send_pre_overhead_bcopy = mm_config->send_pre_overhead_bcopy;
+    self->config.recv_overhead_short     = mm_config->recv_overhead_short;
+    self->config.recv_overhead_bcopy     = mm_config->recv_overhead_bcopy;
 
     self->config.fifo_size         = mm_config->fifo_size;
     self->config.fifo_elem_size    = mm_config->fifo_elem_size;
