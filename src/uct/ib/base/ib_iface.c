@@ -211,17 +211,16 @@ ucs_config_field_t uct_ib_iface_config_table[] = {
    ucs_offsetof(uct_ib_iface_config_t, send_pre_overhead),
    UCS_CONFIG_TYPE_TIME_UNITS},
 
-  {"SEND_POST_OVERHEAD", UCS_VALUE_AUTO_STR,
+  {"SEND_POST_OVERHEAD", "common:40ns,zcopy:20ns",
    "Time spent in the UCT layer after the message request has been passed to "
    "the hardware or system software layers and before operation has been "
    "finalized, in seconds", 0,
-   UCS_CONFIG_TYPE_KEY_VALUE(UCS_CONFIG_TYPE_TIME_UNITS,
-   {"common", "doorbell write effect on CPU operations pipeline",
-    ucs_offsetof(uct_ib_iface_config_t, send_post_overhead_common)},
-   {"zcopy", "completion for every operation",
-    ucs_offsetof(uct_ib_iface_config_t, send_post_overhead_zcopy)},
-   {NULL},
-  )},
+   UCS_CONFIG_TYPE_KEY_VALUE(UCS_CONFIG_TYPE_TIME,
+       {"common", "doorbell write effect on CPU operations pipeline",
+        ucs_offsetof(uct_ib_iface_config_t, send_post_overhead_common)},
+       {"zcopy", "completion for every operation",
+        ucs_offsetof(uct_ib_iface_config_t, send_post_overhead_zcopy)},
+       {NULL},)},
 
   {NULL}
 };
@@ -1779,55 +1778,20 @@ uct_ib_iface_estimate_perf(uct_iface_h iface, uct_perf_attr_t *perf_attr)
     double send_post_overhead_zcopy;
     uct_iface_attr_t iface_attr;
     ucs_status_t status;
-    ucs_cpu_vendor_t cpu_vendor;
 
     status = uct_iface_query(iface, &iface_attr);
     if (status != UCS_OK) {
         return status;
     }
 
-    cpu_vendor = ucs_arch_get_cpu_vendor();
-
     if (ib_iface->config.send_pre_overhead != UCS_TIME_AUTO) {
         send_pre_overhead = ucs_time_to_sec(ib_iface->config.send_pre_overhead);
     } else {
-        switch (cpu_vendor) {
-            case UCS_CPU_VENDOR_FUJITSU_ARM:
-            send_pre_overhead = 100e-9;
-            break;
-        default:
-            send_pre_overhead = iface_attr.overhead;
-            break;
-        }
+        send_pre_overhead = iface_attr.overhead;
     }
 
-    if (ib_iface->config.send_post_overhead_common != UCS_TIME_AUTO) {
-        send_post_overhead = ucs_time_to_sec(ib_iface->config.send_post_overhead_common);
-    } else {
-        switch (cpu_vendor) {
-        case UCS_CPU_VENDOR_FUJITSU_ARM:
-            send_post_overhead = 400e-9;
-            break;
-        default:
-            /* Doorbell write effect on CPU operations pipeline */
-            send_post_overhead = 40e-9;
-            break;
-        }
-    }
-
-    if (ib_iface->config.send_post_overhead_zcopy != UCS_TIME_AUTO) {
-        send_post_overhead_zcopy = ucs_time_to_sec(ib_iface->config.send_post_overhead_zcopy);
-    } else {
-        switch (cpu_vendor) {
-        case UCS_CPU_VENDOR_FUJITSU_ARM:
-            send_post_overhead_zcopy = 50e-9;
-            break;
-        default:
-            /* Completion for every operation */
-            send_post_overhead_zcopy = 20e-9;
-            break;
-        }
-    }
+    send_post_overhead = ib_iface->config.send_post_overhead_common;
+    send_post_overhead_zcopy = ib_iface->config.send_post_overhead_zcopy;
 
     if (perf_attr->field_mask & UCT_PERF_ATTR_FIELD_SEND_PRE_OVERHEAD) {
         perf_attr->send_pre_overhead = send_pre_overhead;

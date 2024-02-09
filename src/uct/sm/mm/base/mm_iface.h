@@ -103,10 +103,10 @@ typedef struct uct_mm_iface_config {
     unsigned                 fifo_elem_size;      /* Size of the FIFO element size */
     int                      error_handling; /* Exposing of error handling cap */
     uct_iface_mpool_config_t mp;
-    ucs_time_t               send_pre_overhead_short;
-    ucs_time_t               send_pre_overhead_bcopy;
-    ucs_time_t               recv_overhead_short;
-    ucs_time_t               recv_overhead_bcopy;
+    double                   send_pre_overhead_short;
+    double                   send_pre_overhead_bcopy;
+    double                   recv_overhead_short;
+    double                   recv_overhead_bcopy;
 } uct_mm_iface_config_t;
 
 
@@ -224,10 +224,10 @@ typedef struct uct_mm_iface {
         unsigned            seg_size;         /* size of the receive descriptor (for payload)*/
         unsigned            fifo_max_poll;
         uint64_t            extra_cap_flags;
-        ucs_time_t          send_pre_overhead_short;
-        ucs_time_t          send_pre_overhead_bcopy;
-        ucs_time_t          recv_overhead_short;
-        ucs_time_t          recv_overhead_bcopy;
+        double              send_pre_overhead_short;
+        double              send_pre_overhead_bcopy;
+        double              recv_overhead_short;
+        double              recv_overhead_bcopy;
     } config;
 } uct_mm_iface_t;
 

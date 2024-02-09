@@ -197,10 +197,10 @@ struct uct_ib_iface_config {
     unsigned long           reverse_sl;
 
     /* Doorbell write effect on CPU operations pipeline */
-    ucs_time_t              send_post_overhead_common;
+    double                  send_post_overhead_common;
 
     /* Completion for every operation */
-    ucs_time_t              send_post_overhead_zcopy;
+    double                  send_post_overhead_zcopy;
 
     ucs_time_t              send_pre_overhead;
 };
@@ -315,8 +315,8 @@ struct uct_ib_iface {
         enum ibv_mtu          path_mtu;
         uint8_t               counter_set_id;
         ucs_time_t            send_pre_overhead;
-        ucs_time_t            send_post_overhead_common;
-        ucs_time_t            send_post_overhead_zcopy;
+        double                send_post_overhead_common;
+        double                send_post_overhead_zcopy;
     } config;
 
     uct_ib_iface_ops_t        *ops;
