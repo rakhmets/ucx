@@ -60,7 +60,10 @@
 
 #define UCP_AM_HANDLER_ENTRY(_id) [_id] = &ucp_am_handler_##_id,
 
-#define UCP_CPU_EST_BCOPY_BW_DEFAULT (5800 * UCS_MBYTE)
+#define UCP_CPU_EST_BCOPY_BW_DEFAULT     (5800 * UCS_MBYTE)
+#define UCS_CPU_EST_BCOPY_BW_AMD         (5008 * UCS_MBYTE)
+#define UCS_CPU_EST_BCOPY_BW_DEFAULT_NEW (7000 * UCS_MBYTE)
+
 
 #define UCP_TL_AUX_SUFFIX    "aux"
 #define UCP_TL_AUX(_tl_name) _tl_name ":" UCP_TL_AUX_SUFFIX
@@ -137,7 +140,7 @@ const size_t ucp_context_est_bcopy_bw[UCS_CPU_VENDOR_LAST] = {
     [UCS_CPU_VENDOR_AMD]         = UCS_CPU_EST_BCOPY_BW_AMD,
     [UCS_CPU_VENDOR_GENERIC_ARM] = UCP_CPU_EST_BCOPY_BW_DEFAULT,
     [UCS_CPU_VENDOR_GENERIC_PPC] = UCP_CPU_EST_BCOPY_BW_DEFAULT,
-    [UCS_CPU_VENDOR_FUJITSU_ARM] = UCS_CPU_EST_BCOPY_BW_FUJITSU_ARM,
+    [UCS_CPU_VENDOR_FUJITSU_ARM] = UCP_CPU_EST_BCOPY_BW_DEFAULT,
     [UCS_CPU_VENDOR_ZHAOXIN]     = UCP_CPU_EST_BCOPY_BW_DEFAULT,
     [UCS_CPU_VENDOR_NVIDIA]      = UCP_CPU_EST_BCOPY_BW_DEFAULT
 };
@@ -1929,7 +1932,7 @@ static ucs_status_t ucp_fill_config(ucp_context_h context,
     if (UCS_CONFIG_DBL_IS_AUTO(context->config.ext.bcopy_bw)) {
         /* bcopy_bw wasn't set via the env variable. Calculate the value */
         if (context->config.ext.proto_enable) {
-            context->config.ext.bcopy_bw = ucs_cpu_get_memcpy_bw();
+            context->config.ext.bcopy_bw = UCS_CPU_EST_BCOPY_BW_DEFAULT_NEW;
         } else {
             context->config.ext.bcopy_bw = ucp_context_get_memcpy_bw();
         }
