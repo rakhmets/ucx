@@ -54,7 +54,8 @@ SUBDIRS += \
 	bindings/java \
 	test/apps \
 	examples \
-	cmake
+	cmake \
+	conf
 
 if HAVE_GTEST
 SUBDIRS += test/gtest
