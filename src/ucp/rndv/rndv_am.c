@@ -29,25 +29,28 @@ ucp_rndv_am_cfg_thresh(ucp_context_t *context, size_t am_thresh)
 static ucs_status_t
 ucp_proto_rndv_am_init_common(ucp_proto_multi_init_params_t *params)
 {
-    ucp_context_h context = params->super.super.worker->context;
+    const ucp_proto_init_params_t *init_params = &params->super.super;
+    ucp_context_h context                      = init_params->worker->context;
+    const ucp_context_config_t *ctx_cfg        = &context->config.ext;
 
-    if (!ucp_proto_rndv_op_check(&params->super.super, UCP_OP_ID_RNDV_SEND,
+    if (!ucp_proto_rndv_op_check(init_params, UCP_OP_ID_RNDV_SEND,
                                  0)) {
         return UCS_ERR_UNSUPPORTED;
     }
 
     params->super.min_length = 0;
     params->super.max_length = SIZE_MAX;
-    params->super.overhead   = 10e-9; /* for multiple lanes management */
+    /* for multiple lanes management */
+    params->super.overhead   = ctx_cfg->proto_overhead_multi;
     params->super.latency    = 0;
     params->first.lane_type  = UCP_LANE_TYPE_AM;
     params->middle.lane_type = UCP_LANE_TYPE_AM_BW;
     params->super.hdr_size   = sizeof(ucp_request_data_hdr_t);
-    params->max_lanes        = context->config.ext.max_rndv_lanes;
+    params->max_lanes        = ctx_cfg->max_rndv_lanes;
     params->opt_align_offs   = UCP_PROTO_COMMON_OFFSET_INVALID;
 
-    return ucp_proto_multi_init(params, params->super.super.priv,
-                                params->super.super.priv_size);
+    return ucp_proto_multi_init(params, init_params->priv,
+                                init_params->priv_size);
 }
 
 static UCS_F_ALWAYS_INLINE void

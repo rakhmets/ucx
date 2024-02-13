@@ -33,19 +33,23 @@ static ucs_status_t
 ucp_proto_eager_multi_init_common(ucp_proto_multi_init_params_t *params,
                                   ucp_proto_id_t op_id)
 {
-    if (!ucp_tag_eager_check_op_id(&params->super.super, op_id, 0)) {
+    const ucp_proto_init_params_t *init_params = &params->super.super;
+    const ucp_context_config_t *ctx_cfg        =
+            &init_params->worker->context->config.ext;
+
+    if (!ucp_tag_eager_check_op_id(init_params, op_id, 0)) {
         return UCS_ERR_UNSUPPORTED;
     }
 
-    params->super.overhead   = 10e-9; /* for multiple lanes management */
+    /* for multiple lanes management */
+    params->super.overhead   = ctx_cfg->proto_overhead_multi;
     params->super.latency    = 0;
     params->first.lane_type  = UCP_LANE_TYPE_AM;
     params->middle.lane_type = UCP_LANE_TYPE_AM_BW;
-    params->max_lanes        =
-            params->super.super.worker->context->config.ext.max_eager_lanes;
+    params->max_lanes        = ctx_cfg->max_eager_lanes;
 
-    return ucp_proto_multi_init(params, params->super.super.priv,
-                                params->super.super.priv_size);
+    return ucp_proto_multi_init(params, init_params->priv,
+                                init_params->priv_size);
 }
 
 static ucs_status_t ucp_proto_eager_bcopy_multi_common_init(

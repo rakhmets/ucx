@@ -178,6 +178,18 @@ static ucs_config_field_t ucp_context_config_table[] = {
         {NULL}
   )},
 
+  {"PROTO_OVERHEAD", "bcopy:5ns,multi:10ns,rndv_rkey_ptr:0",
+   "Threshold for switching from eager to rendezvous protocol", 0,
+    UCS_CONFIG_TYPE_KEY_VALUE(UCS_CONFIG_TYPE_TIME,
+        {"bcopy", "bcopy",
+         ucs_offsetof(ucp_context_config_t, proto_overhead_bcopy)},
+        {"multi", "multi",
+         ucs_offsetof(ucp_context_config_t, proto_overhead_multi)},
+        {"rndv_rkey_ptr", "rndv_rkey_ptr",
+         ucs_offsetof(ucp_context_config_t, proto_overhead_rndv_rkey_ptr)},
+        {NULL}
+  )},
+
   {"RNDV_SEND_NBR_THRESH", "256k",
    "Threshold for switching from eager to rendezvous protocol in ucp_tag_send_nbr().\n"
    "Relevant only if UCX_RNDV_THRESH is set to \"auto\".",
