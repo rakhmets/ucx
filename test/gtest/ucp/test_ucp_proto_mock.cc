@@ -310,8 +310,8 @@ UCS_TEST_P(test_ucp_proto_mock_rcx, mock_iface_attr, "IB_NUM_PATHS?=1")
     check_ep_config(sender(), {
         {0,      200,              "short"},
         {201,    8246,             "copy-in"},
-        {8247,   377094,           "multi-frag copy-in"},
-        {377095, UCS_MEMUNITS_INF, "rendezvous zero-copy read from remote"},
+        {8247,   363935,           "multi-frag copy-in"},
+        {363936, UCS_MEMUNITS_INF, "rendezvous zero-copy read from remote"},
     }, key);
 }
 
