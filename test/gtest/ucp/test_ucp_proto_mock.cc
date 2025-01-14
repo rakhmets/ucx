@@ -315,4 +315,19 @@ UCS_TEST_P(test_ucp_proto_mock_rcx, mock_iface_attr, "IB_NUM_PATHS?=1")
     }, key);
 }
 
+UCS_TEST_P(test_ucp_proto_mock_rcx, zero_rndv_perf_diff, "IB_NUM_PATHS?=1",
+           "RNDV_PERF_DIFF=0")
+{
+    ucp_proto_select_key_t key = any_key();
+    key.param.op_id_flags      = UCP_OP_ID_AM_SEND;
+    key.param.op_attr          = 0;
+
+    check_ep_config(sender(), {
+        {0,      200,              "short"},
+        {201,    8246,             "copy-in"},
+        {8247,   377094,           "multi-frag copy-in"},
+        {377095, UCS_MEMUNITS_INF, "rendezvous zero-copy read from remote"},
+    }, key);
+}
+
 UCP_INSTANTIATE_TEST_CASE_TLS(test_ucp_proto_mock_rcx, rcx, "rc_x")
