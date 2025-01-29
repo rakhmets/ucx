@@ -41,26 +41,33 @@
 #define IP_STRING_LEN          50
 #define PORT_STRING_LEN        8
 #define TAG                    0xCAFE
-#define COMM_TYPE_DEFAULT      "STREAM"
 #define PRINT_INTERVAL         2000
 #define DEFAULT_NUM_ITERATIONS 1
 #define TEST_AM_ID             0
 
 
-static long test_string_length = 16;
-static long iov_cnt            = 1;
-static uint16_t server_port    = DEFAULT_PORT;
-static sa_family_t ai_family   = AF_INET;
-static int num_iterations      = DEFAULT_NUM_ITERATIONS;
-static int connection_closed   = 1;
-
-
 typedef enum {
-    CLIENT_SERVER_SEND_RECV_STREAM  = UCS_BIT(0),
-    CLIENT_SERVER_SEND_RECV_TAG     = UCS_BIT(1),
-    CLIENT_SERVER_SEND_RECV_AM      = UCS_BIT(2),
-    CLIENT_SERVER_SEND_RECV_DEFAULT = CLIENT_SERVER_SEND_RECV_STREAM
+    SEND_RECV_TYPE_STREAM  = 0,
+    SEND_RECV_TYPE_TAG,
+    SEND_RECV_TYPE_AM,
+    SEND_RECV_TYPE_DEFAULT = SEND_RECV_TYPE_STREAM,
 } send_recv_type_t;
+
+
+static const char *const send_recv_type_names[] = {
+    [SEND_RECV_TYPE_STREAM] = "stream",
+    [SEND_RECV_TYPE_TAG]    = "tag",
+    [SEND_RECV_TYPE_AM]     = "am"
+};
+
+
+static long test_string_length         = 16;
+static long iov_cnt                    = 1;
+static uint16_t server_port            = DEFAULT_PORT;
+static sa_family_t ai_family           = AF_INET;
+static int num_iterations              = DEFAULT_NUM_ITERATIONS;
+static int connection_closed           = 1;
+static send_recv_type_t send_recv_type = SEND_RECV_TYPE_DEFAULT;
 
 
 /**
@@ -593,12 +600,13 @@ static void usage()
     fprintf(stderr, "  -p Port number to listen/connect to (default = %d). "
                     "0 on the server side means select a random port and print it\n",
                     DEFAULT_PORT);
-    fprintf(stderr, "  -c Communication type for the client and server. "
-                    "  Valid values are:\n"
-                    "      'stream' : Stream API\n"
-                    "      'tag'    : Tag API\n"
-                    "      'am'     : AM API\n"
-                    "     If not specified, %s API will be used.\n", COMM_TYPE_DEFAULT);
+    fprintf(stderr, "  -c Communication type for the client and server\n"
+                    "     %s - Stream API (default)\n"
+                    "     %s - Tag API\n"
+                    "     %s - AM API\n",
+                    send_recv_type_names[SEND_RECV_TYPE_STREAM],
+                    send_recv_type_names[SEND_RECV_TYPE_TAG],
+                    send_recv_type_names[SEND_RECV_TYPE_AM]);
     fprintf(stderr, "  -i Number of iterations to run. Client and server must "
                     "have the same value. (default = %d).\n",
                     num_iterations);
@@ -609,12 +617,28 @@ static void usage()
     fprintf(stderr, "\n");
 }
 
+static send_recv_type_t parse_send_recv_type(const char *opt_arg)
+{
+    size_t i;
+
+    for (i = 0; i < ucs_static_array_size(send_recv_type_names); ++i) {
+        if (!strcasecmp(opt_arg, send_recv_type_names[i])) {
+            return i;
+        }
+    }
+
+    if (i == ucs_static_array_size(send_recv_type_names)) {
+        fprintf(stderr, "Wrong communication type '%s'. Using '%s' as default.\n",
+                opt_arg, send_recv_type_names[SEND_RECV_TYPE_DEFAULT]);
+        return SEND_RECV_TYPE_DEFAULT;
+    }
+}
+
 /**
  * Parse the command line arguments.
  */
 static parse_cmd_status_t parse_cmd(int argc, char *const argv[],
-                                    char **server_addr, char **listen_addr,
-                                    send_recv_type_t *send_recv_type)
+                                    char **server_addr, char **listen_addr)
 {
     int c = 0;
     int port;
@@ -625,17 +649,7 @@ static parse_cmd_status_t parse_cmd(int argc, char *const argv[],
             *server_addr = optarg;
             break;
         case 'c':
-            if (!strcasecmp(optarg, "stream")) {
-                *send_recv_type = CLIENT_SERVER_SEND_RECV_STREAM;
-            } else if (!strcasecmp(optarg, "tag")) {
-                *send_recv_type = CLIENT_SERVER_SEND_RECV_TAG;
-            } else if (!strcasecmp(optarg, "am")) {
-                *send_recv_type = CLIENT_SERVER_SEND_RECV_AM;
-            } else {
-                fprintf(stderr, "Wrong communication type %s. "
-                        "Using %s as default\n", optarg, COMM_TYPE_DEFAULT);
-                *send_recv_type = CLIENT_SERVER_SEND_RECV_DEFAULT;
-            }
+            send_recv_type = parse_send_recv_type(optarg);
             break;
         case 'l':
             *listen_addr = optarg;
@@ -727,21 +741,20 @@ static char* sockaddr_get_port_str(const struct sockaddr_storage *sock_addr,
 }
 
 static int client_server_communication(ucp_worker_h worker, ucp_ep_h ep,
-                                       send_recv_type_t send_recv_type,
                                        int is_server, int current_iter)
 {
     int ret;
 
     switch (send_recv_type) {
-    case CLIENT_SERVER_SEND_RECV_STREAM:
+    case SEND_RECV_TYPE_STREAM:
         /* Client-Server communication via Stream API */
         ret = send_recv_stream(worker, ep, is_server, current_iter);
         break;
-    case CLIENT_SERVER_SEND_RECV_TAG:
+    case SEND_RECV_TYPE_TAG:
         /* Client-Server communication via Tag-Matching API */
         ret = send_recv_tag(worker, ep, is_server, current_iter);
         break;
-    case CLIENT_SERVER_SEND_RECV_AM:
+    case SEND_RECV_TYPE_AM:
         /* Client-Server communication via AM API. */
         ret = send_recv_am(worker, ep, is_server, current_iter);
         break;
@@ -905,7 +918,7 @@ ucs_status_t register_am_recv_callback(ucp_worker_h worker)
 }
 
 static int client_server_do_work(ucp_worker_h ucp_worker, ucp_ep_h ep,
-                                 send_recv_type_t send_recv_type, int is_server)
+                                 int is_server)
 {
     int i, ret = 0;
     ucs_status_t status;
@@ -913,8 +926,7 @@ static int client_server_do_work(ucp_worker_h ucp_worker, ucp_ep_h ep,
     connection_closed = 0;
 
     for (i = 0; i < num_iterations; i++) {
-        ret = client_server_communication(ucp_worker, ep, send_recv_type,
-                                          is_server, i);
+        ret = client_server_communication(ucp_worker, ep, is_server, i);
         if (ret != 0) {
             fprintf(stderr, "%s failed on iteration #%d\n",
                     (is_server ? "server": "client"), i + 1);
@@ -923,7 +935,7 @@ static int client_server_do_work(ucp_worker_h ucp_worker, ucp_ep_h ep,
     }
 
     /* Register recv callback on the client side to receive FIN message */
-    if (!is_server && (send_recv_type == CLIENT_SERVER_SEND_RECV_AM)) {
+    if (!is_server && (send_recv_type == SEND_RECV_TYPE_AM)) {
         status = register_am_recv_callback(ucp_worker);
         if (status != UCS_OK) {
             ret = -1;
@@ -932,8 +944,7 @@ static int client_server_do_work(ucp_worker_h ucp_worker, ucp_ep_h ep,
     }
 
     /* FIN message in reverse direction to acknowledge delivery */
-    ret = client_server_communication(ucp_worker, ep, send_recv_type,
-                                      !is_server, i + 1);
+    ret = client_server_communication(ucp_worker, ep, !is_server, i + 1);
     if (ret != 0) {
         fprintf(stderr, "%s failed on FIN message\n",
                 (is_server ? "server": "client"));
@@ -952,7 +963,7 @@ out:
 }
 
 static int run_server(ucp_context_h ucp_context, ucp_worker_h ucp_worker,
-                      char *listen_addr, send_recv_type_t send_recv_type)
+                      char *listen_addr)
 {
     ucx_server_ctx_t context;
     ucp_worker_h     ucp_data_worker;
@@ -967,7 +978,7 @@ static int run_server(ucp_context_h ucp_context, ucp_worker_h ucp_worker,
         goto err;
     }
 
-    if (send_recv_type == CLIENT_SERVER_SEND_RECV_AM) {
+    if (send_recv_type == SEND_RECV_TYPE_AM) {
         status = register_am_recv_callback(ucp_data_worker);
         if (status != UCS_OK) {
             ret = -1;
@@ -1011,8 +1022,7 @@ static int run_server(ucp_context_h ucp_context, ucp_worker_h ucp_worker,
 
         /* The server waits for all the iterations to complete before moving on
          * to the next client */
-        ret = client_server_do_work(ucp_data_worker, server_ep, send_recv_type,
-                                    1);
+        ret = client_server_do_work(ucp_data_worker, server_ep, 1);
         if (ret != 0) {
             goto err_ep;
         }
@@ -1036,8 +1046,7 @@ err:
     return ret;
 }
 
-static int run_client(ucp_worker_h ucp_worker, char *server_addr,
-                      send_recv_type_t send_recv_type)
+static int run_client(ucp_worker_h ucp_worker, char *server_addr)
 {
     ucp_ep_h     client_ep;
     ucs_status_t status;
@@ -1050,7 +1059,7 @@ static int run_client(ucp_worker_h ucp_worker, char *server_addr,
         goto out;
     }
 
-    ret = client_server_do_work(ucp_worker, client_ep, send_recv_type, 0);
+    ret = client_server_do_work(ucp_worker, client_ep, 0);
 
     /* Close the endpoint to the server */
     ep_close(ucp_worker, client_ep, UCP_EP_CLOSE_FLAG_FORCE);
@@ -1062,8 +1071,7 @@ out:
 /**
  * Initialize the UCP context and worker.
  */
-static int init_context(ucp_context_h *ucp_context, ucp_worker_h *ucp_worker,
-                        send_recv_type_t send_recv_type)
+static int init_context(ucp_context_h *ucp_context, ucp_worker_h *ucp_worker)
 {
     /* UCP objects */
     ucp_params_t ucp_params;
@@ -1076,9 +1084,9 @@ static int init_context(ucp_context_h *ucp_context, ucp_worker_h *ucp_worker,
     ucp_params.field_mask = UCP_PARAM_FIELD_FEATURES | UCP_PARAM_FIELD_NAME;
     ucp_params.name       = "client_server";
 
-    if (send_recv_type == CLIENT_SERVER_SEND_RECV_STREAM) {
+    if (send_recv_type == SEND_RECV_TYPE_STREAM) {
         ucp_params.features = UCP_FEATURE_STREAM;
-    } else if (send_recv_type == CLIENT_SERVER_SEND_RECV_TAG) {
+    } else if (send_recv_type == SEND_RECV_TYPE_TAG) {
         ucp_params.features = UCP_FEATURE_TAG;
     } else {
         ucp_params.features = UCP_FEATURE_AM;
@@ -1107,7 +1115,6 @@ err:
 
 int main(int argc, char **argv)
 {
-    send_recv_type_t send_recv_type = CLIENT_SERVER_SEND_RECV_DEFAULT;
     char *server_addr = NULL;
     char *listen_addr = NULL;
     parse_cmd_status_t parse_cmd_status;
@@ -1117,8 +1124,7 @@ int main(int argc, char **argv)
     ucp_context_h ucp_context;
     ucp_worker_h  ucp_worker;
 
-    parse_cmd_status = parse_cmd(argc, argv, &server_addr, &listen_addr,
-                                 &send_recv_type);
+    parse_cmd_status = parse_cmd(argc, argv, &server_addr, &listen_addr);
     if (parse_cmd_status == PARSE_CMD_STATUS_PRINT_HELP) {
         ret = 0;
         goto err;
@@ -1128,7 +1134,7 @@ int main(int argc, char **argv)
     }
 
     /* Initialize the UCX required objects */
-    ret = init_context(&ucp_context, &ucp_worker, send_recv_type);
+    ret = init_context(&ucp_context, &ucp_worker);
     if (ret != 0) {
         goto err;
     }
@@ -1136,10 +1142,10 @@ int main(int argc, char **argv)
     /* Client-Server initialization */
     if (server_addr == NULL) {
         /* Server side */
-        ret = run_server(ucp_context, ucp_worker, listen_addr, send_recv_type);
+        ret = run_server(ucp_context, ucp_worker, listen_addr);
     } else {
         /* Client side */
-        ret = run_client(ucp_worker, server_addr, send_recv_type);
+        ret = run_client(ucp_worker, server_addr);
     }
 
     ucp_worker_destroy(ucp_worker);
