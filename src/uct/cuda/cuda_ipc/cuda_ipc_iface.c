@@ -193,25 +193,30 @@ static double uct_cuda_ipc_iface_get_bw()
 
 static int uct_cuda_ipc_get_device_nvlinks(int ordinal)
 {
-    static int num_nvlinks = -1;
-    unsigned link;
+    static int num_active_nvlinks = -1;
     nvmlDevice_t device;
-    nvmlFieldValue_t value;
-    nvmlPciInfo_t pci;
     ucs_status_t status;
+    nvmlFieldValue_t value;
+    unsigned num_nvlinks, link;
+    nvmlPciInfo_t pci;
 
-    if (num_nvlinks != -1) {
-        return num_nvlinks;
+    if (num_active_nvlinks != -1) {
+        return num_active_nvlinks;
     }
 
-    status = UCT_CUDA_NVML_WRAP_CALL(nvmlDeviceGetHandleByIndex, 0, &device);
+    num_active_nvlinks = 0;
+    status             = UCT_CUDA_NVML_WRAP_CALL(nvmlDeviceGetHandleByIndex, 0,
+                                                 &device);
     if (status != UCS_OK) {
-        goto err;
+        goto out;
     }
 
     value.fieldId = NVML_FI_DEV_NVLINK_LINK_COUNT;
-
-    UCT_CUDA_NVML_WRAP_CALL(nvmlDeviceGetFieldValues, device, 1, &value);
+    status        = UCT_CUDA_NVML_WRAP_CALL(nvmlDeviceGetFieldValues, device, 1,
+                                            &value);
+    if (status != UCS_OK) {
+        goto out;
+    }
 
     num_nvlinks = ((value.nvmlReturn == NVML_SUCCESS) &&
                    (value.valueType == NVML_VALUE_TYPE_UNSIGNED_INT)) ?
@@ -224,14 +229,13 @@ static int uct_cuda_ipc_get_device_nvlinks(int ordinal)
                                          device, link, &pci);
         if (status != UCS_OK) {
             ucs_debug("could not find remote end info for link %u", link);
-            goto err;
+        } else {
+            ++num_active_nvlinks;
         }
     }
 
-    return num_nvlinks;
-
-err:
-    return 0;
+out:
+    return num_active_nvlinks;
 }
 
 static size_t uct_cuda_ipc_iface_get_max_get_zcopy(uct_cuda_ipc_iface_t *iface)
