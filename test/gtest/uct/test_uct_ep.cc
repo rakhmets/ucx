@@ -232,8 +232,8 @@ UCS_TEST_SKIP_COND_P(test_uct_ep, destroy_entity_after_send,
 
         const uct_iface_attr &iface_attr = m_sender->iface_attr();
         const size_t msg_length          = 256 * UCS_KBYTE;
-        ucs::auto_ptr<mapped_buffer> buffer(
-                new mapped_buffer(msg_length, 0, *m_sender));
+        std::unique_ptr<mapped_buffer> buffer{new mapped_buffer(msg_length, 0,
+                                                                *m_sender)};
 
         UCS_TEST_GET_BUFFER_IOV(iov, iovcnt, buffer->ptr(),
                                 ucs_min(buffer->length(),

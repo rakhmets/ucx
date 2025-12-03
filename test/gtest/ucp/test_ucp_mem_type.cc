@@ -64,8 +64,8 @@ public:
 
     static const uint64_t SEED = 0x1111111111111111lu;
 protected:
-    size_t                     m_size;
-    ucs::auto_ptr<mem_buffer>  m_send_buffer, m_recv_buffer;
+    size_t                      m_size;
+    std::unique_ptr<mem_buffer> m_send_buffer, m_recv_buffer;
 };
 
 UCS_TEST_P(test_ucp_mem_type_alloc_before_init, xfer) {

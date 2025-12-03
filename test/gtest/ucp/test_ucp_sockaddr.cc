@@ -2348,7 +2348,7 @@ protected:
             void *rreq = NULL, *sreq = NULL;
             std::vector<void*> reqs;
 
-            ucs::auto_ptr<scoped_log_handler> slh;
+            std::unique_ptr<scoped_log_handler> slh;
             if (err_handling_test ||
                 (i == 0) /* to handle unreachable on 1st iteration */) {
                 slh.reset(new scoped_log_handler(wrap_errors_logger));

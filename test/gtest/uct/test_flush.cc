@@ -632,7 +632,7 @@ public:
     class peer {
     public:
         peer(uct_cancel_test &test) :
-            m_e(NULL), m_buf(NULL), m_buf32(NULL), m_peer(NULL), m_test(test)
+            m_test(test)
         {
             m_e = m_test.uct_test::create_entity(0, error_handler_cb);
             m_test.m_entities.push_back(m_e);
@@ -650,17 +650,17 @@ public:
             m_peer->m_e->connect(0, *m_e, 0);
         }
 
-        entity                       *m_e;
-        ucs::auto_ptr<mapped_buffer> m_buf;
-        ucs::auto_ptr<mapped_buffer> m_buf32;
-        peer                         *m_peer;
+        entity                         *m_e{nullptr};
+        std::unique_ptr<mapped_buffer> m_buf;
+        std::unique_ptr<mapped_buffer> m_buf32;
+        peer                           *m_peer{nullptr};
 
     private:
         uct_cancel_test &m_test;
     };
 
     uct_cancel_test() :
-        uct_test(), m_s0(NULL), m_s1(NULL), m_err_count(0)
+        uct_test(), m_err_count(0)
     {
     }
 
@@ -774,8 +774,8 @@ public:
         ucs_status_t status;
         std::list<peer *> filling;
 
-        filling.push_back(m_s0);
-        filling.push_back(m_s1);
+        filling.push_back(m_s0.get());
+        filling.push_back(m_s1.get());
         while (!filling.empty()) {
             std::list<peer *>::iterator iter = filling.begin();
             while (iter != filling.end()) {
@@ -804,8 +804,8 @@ public:
 
 protected:
 
-    ucs::auto_ptr<peer> m_s0;
-    ucs::auto_ptr<peer> m_s1;
+    std::unique_ptr<peer> m_s0;
+    std::unique_ptr<peer> m_s1;
     int m_err_count;
 
     virtual void init() {
@@ -815,8 +815,8 @@ protected:
         check_skip_test_tl();
         m_s1.reset(new peer(*this));
 
-        m_s0->m_peer = m_s1;
-        m_s1->m_peer = m_s0;
+        m_s0->m_peer = m_s1.get();
+        m_s1->m_peer = m_s0.get();
 
         m_s0->connect();
         flush();

@@ -121,8 +121,8 @@ public:
     }
 
 protected:
-    ucs::auto_ptr<qp> m_qp;
-    event_ctx         m_event;
+    std::unique_ptr<qp> m_qp;
+    event_ctx           m_event;
 };
 
 class uct_ep_test_event : public uct_test_event_base {
@@ -329,7 +329,7 @@ public:
     }
 
 protected:
-    ucs::auto_ptr<entity> m_e;
+    std::unique_ptr<entity> m_e;
 
 private:
 #if HAVE_MLX5_DV
