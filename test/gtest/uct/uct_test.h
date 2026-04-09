@@ -269,6 +269,10 @@ protected:
         uct_rkey_t rkey() const;
         const uct_iov_t* iov() const;
 
+        uct_rkey_bundle_t *rkey_bundle() {
+            return &m_rkey;
+        }
+
         void pattern_fill(uint64_t seed);
         void pattern_check(uint64_t seed);
         void memset(int c);

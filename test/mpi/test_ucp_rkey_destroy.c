@@ -13,6 +13,8 @@
 #include "test_ucp.h"
 #include "test_ucx_check_def.h"
 
+#include <ucp/api/device/ucp_host.h>
+
 #include <cuda.h>
 #include <mpi.h>
 
@@ -50,10 +52,34 @@ static void rank1(ucp_ep_h ucp_ep)
 {
     rkey_t rkey;
     void *ptr;
+    ucp_device_mem_list_elem_t device_mem_list_elem;
+    ucp_device_mem_list_params_t device_mem_list_params;
+    ucp_device_remote_mem_list_h device_remote_mem_list;
 
     rkey = recv_rkey(0, ucp_ep);
 
     UCX_CHECK(ucp_rkey_ptr(rkey.rkey, rkey.remote_address, &ptr));
+
+    device_mem_list_elem.field_mask =
+            UCP_DEVICE_MEM_LIST_ELEM_FIELD_REMOTE_ADDR |
+            UCP_DEVICE_MEM_LIST_ELEM_FIELD_RKEY |
+            UCP_DEVICE_MEM_LIST_ELEM_FIELD_EP;
+    device_mem_list_elem.remote_addr = rkey.remote_address;
+    device_mem_list_elem.rkey        = rkey.rkey;
+    device_mem_list_elem.ep          = ucp_ep;
+
+    device_mem_list_params.field_mask =
+            UCP_DEVICE_MEM_LIST_PARAMS_FIELD_ELEMENT_SIZE |
+            UCP_DEVICE_MEM_LIST_PARAMS_FIELD_NUM_ELEMENTS |
+            UCP_DEVICE_MEM_LIST_PARAMS_FIELD_ELEMENTS;
+    device_mem_list_params.element_size = sizeof(device_mem_list_elem);
+    device_mem_list_params.num_elements = 1;
+    device_mem_list_params.elements     = &device_mem_list_elem;
+
+    UCX_CHECK(ucp_device_remote_mem_list_create(&device_mem_list_params,
+                                                &device_remote_mem_list));
+    ucp_device_mem_list_release(device_remote_mem_list);
+
     ucp_rkey_destroy(rkey.rkey);
 
     MPI_Barrier(MPI_COMM_WORLD);
@@ -86,7 +112,7 @@ int main(int argc, char **argv)
     CUDA_CHECK(cuDevicePrimaryCtxRetain(&cu_ctx, cu_dev));
     CUDA_CHECK(cuCtxSetCurrent(cu_ctx));
 
-    ucp = create_ucp();
+    ucp = create_ucp(UCP_FEATURE_RMA | UCP_FEATURE_DEVICE);
 
     if (rank == 0) {
         rank0(ucp.context);

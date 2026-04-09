@@ -3161,7 +3161,7 @@ uct_ib_mlx5_devx_md_open(struct ibv_device *ibv_device,
 
 static ucs_status_t
 uct_ib_md_mlx5_devx_md_mem_elem_pack(uct_md_h md, uct_mem_h memh,
-                                     uct_rkey_t rkey,
+                                     uct_rkey_bundle_t *rkey_ob,
                                      uct_device_mem_element_t *mem_elem_p)
 {
     uct_ib_md_device_mem_element_t *mem_elem = (uct_ib_md_device_mem_element_t*)
@@ -3173,8 +3173,8 @@ uct_ib_md_mlx5_devx_md_mem_elem_pack(uct_md_h md, uct_mem_h memh,
         mem_elem->lkey = UCT_IB_INVALID_MKEY;
     }
 
-    if (rkey != UCT_INVALID_RKEY) {
-        mem_elem->rkey = htonl(uct_ib_md_direct_rkey(rkey));
+    if ((rkey_ob != NULL) && (rkey_ob->rkey != UCT_INVALID_RKEY)) {
+        mem_elem->rkey = htonl(uct_ib_md_direct_rkey(rkey_ob->rkey));
     } else {
         mem_elem->rkey = UCT_IB_INVALID_MKEY;
     }

@@ -191,7 +191,7 @@ UCS_TEST_P(test_cuda_ipc_rma, get_mem_elem_pack)
 
     uct_device_mem_element_t mem_elem_host;
     EXPECT_UCS_OK(uct_md_mem_elem_pack(m_sender->md(), sendbuf.memh(),
-                                       recvbuf.rkey(), &mem_elem_host));
+                                       recvbuf.rkey_bundle(), &mem_elem_host));
 }
 
 UCS_TEST_P(test_cuda_ipc_rma, get_device_ep)
@@ -223,7 +223,7 @@ UCS_TEST_P(test_cuda_ipc_rma_device, put_device)
 
     uct_device_local_mem_list_elem_t src_elem_host;
     ASSERT_UCS_OK(uct_md_mem_elem_pack(m_sender->md(), sendbuf.memh(),
-                                       recvbuf.rkey(),
+                                       recvbuf.rkey_bundle(),
                                        &src_elem_host.uct_mem_element));
 
 
@@ -277,8 +277,8 @@ UCS_TEST_P(test_cuda_ipc_rma_device, atomic_add_device)
 
     uct_device_mem_element_t mem_elem_host;
     ASSERT_EQ(CUDA_SUCCESS, cuMemAlloc((CUdeviceptr*)&mem_elem, mem_elem_size));
-    ASSERT_UCS_OK(uct_md_mem_elem_pack(m_sender->md(), nullptr, signal.rkey(),
-                                       &mem_elem_host));
+    ASSERT_UCS_OK(uct_md_mem_elem_pack(m_sender->md(), nullptr,
+                                       signal.rkey_bundle(), &mem_elem_host));
     ASSERT_EQ(CUDA_SUCCESS, cuMemcpyHtoD((CUdeviceptr)mem_elem, &mem_elem_host,
                                          mem_elem_size));
 

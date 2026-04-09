@@ -290,7 +290,7 @@ static ucs_status_t ucp_device_local_mem_list_element_pack(
         return UCS_ERR_INVALID_PARAM;
     }
 
-    status = uct_md_mem_elem_pack(ucp_md->md, uct_memh, UCT_INVALID_RKEY,
+    status = uct_md_mem_elem_pack(ucp_md->md, uct_memh, NULL,
                                   &mem_element->uct_mem_element);
     if (status != UCS_OK) {
         ucs_error("failed to pack local mem element for memh=%p", memh);
@@ -483,7 +483,7 @@ static ucs_status_t ucp_device_remote_mem_list_element_pack(
     ucp_ep_config_t *ep_config            = ucp_ep_config(ep);
     ucp_lane_index_t lanes[UCP_DEVICE_MEM_LIST_MAX_EPS];
     uint8_t rkey_index;
-    uct_rkey_t uct_rkey;
+    uct_rkey_bundle_t *rkey_ob;
     uct_ep_h uct_ep;
     uct_device_ep_h device_ep;
     ucs_status_t status;
@@ -507,12 +507,11 @@ static ucs_status_t ucp_device_remote_mem_list_element_pack(
 
     rkey_index = ucs_bitmap2idx(rkey->md_map,
                                 ep_config->key.lanes[lane].dst_md_index);
-    uct_rkey   = ucp_rkey_get_tl_rkey(rkey, rkey_index);
-    ucs_assert(uct_rkey != UCT_INVALID_RKEY);
+    rkey_ob    = &rkey->tl_rkey[rkey_index].rkey;
 
     mem_element->device_ep = device_ep;
     mem_element->addr      = element->remote_addr;
-    status = uct_md_mem_elem_pack(ucp_ep_md(ep, lane), NULL, uct_rkey,
+    status = uct_md_mem_elem_pack(ucp_ep_md(ep, lane), NULL, rkey_ob,
                                   &mem_element->uct_mem_element);
     if (status != UCS_OK) {
         ucs_error("failed to pack uct memory element for lane=%u", lane);

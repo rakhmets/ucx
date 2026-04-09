@@ -22,7 +22,7 @@ typedef struct {
 } rkey_t;
 
 
-ucp_t create_ucp();
+ucp_t create_ucp(uint64_t);
 
 
 void destroy_ucp(ucp_t);

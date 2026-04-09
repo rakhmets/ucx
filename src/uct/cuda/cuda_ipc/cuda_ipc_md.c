@@ -647,29 +647,52 @@ static void uct_cuda_ipc_md_close(uct_md_h md)
 }
 
 static ucs_status_t
-uct_cuda_ipc_md_mem_elem_pack(uct_md_h md, uct_mem_h memh, uct_rkey_t rkey,
-                              uct_device_mem_element_t *mem_elem_p)
+uct_cuda_ipc_md_put_mapped_addr(uct_rkey_t rkey, void *handle)
 {
-    uct_cuda_ipc_unpacked_rkey_t *key = (uct_cuda_ipc_unpacked_rkey_t*)rkey;
-    uct_cuda_ipc_md_device_mem_element_t *cuda_ipc_md_mem_element =
-            (uct_cuda_ipc_md_device_mem_element_t*)mem_elem_p;
-    ucs_status_t status;
-    CUdevice cuda_device;
+    uct_cuda_ipc_rkey_handle_t *rkey_handle;
+    uct_cuda_ipc_extended_rkey_t *extended_rkey;
     void *mapped_addr;
+    ucs_status_t status;
 
-    if (UCT_CUDADRV_FUNC_LOG_DEBUG(cuCtxGetDevice(&cuda_device)) != UCS_OK) {
-        return UCS_ERR_UNREACHABLE;
+    rkey_handle = (uct_cuda_ipc_rkey_handle_t*)handle;
+    if (rkey_handle->mapped_addr != NULL) {
+        return UCS_OK;
     }
 
-    status = uct_cuda_ipc_map_memhandle(&key->super, cuda_device, &mapped_addr,
-                                        UCS_LOG_LEVEL_ERROR);
-    if (ucs_unlikely(status != UCS_OK)) {
+    extended_rkey = (uct_cuda_ipc_extended_rkey_t*)rkey;
+    status        = uct_cuda_ipc_map_memhandle(extended_rkey,
+                                               rkey_handle->cu_dev,
+                                               &mapped_addr,
+                                               UCS_LOG_LEVEL_ERROR);
+    if (status != UCS_OK) {
         return status;
     }
 
-    cuda_ipc_md_mem_element->mapped_offset =
-            UCS_PTR_BYTE_DIFF(key->super.super.d_bptr, mapped_addr);
+    rkey_handle->mapped_addr = mapped_addr;
+    return UCS_OK;
+}
 
+static ucs_status_t
+uct_cuda_ipc_md_mem_elem_pack(uct_md_h md, uct_mem_h memh,
+                              uct_rkey_bundle_t *rkey_ob,
+                              uct_device_mem_element_t *mem_elem_p)
+{
+    ucs_status_t status;
+    uct_cuda_ipc_md_device_mem_element_t *md_device_mem_element;
+    uct_cuda_ipc_extended_rkey_t *extended_rkey;
+    uct_cuda_ipc_rkey_handle_t *rkey_handle;
+
+    status = uct_cuda_ipc_md_put_mapped_addr(rkey_ob->rkey, rkey_ob->handle);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    md_device_mem_element = (uct_cuda_ipc_md_device_mem_element_t*)mem_elem_p;
+    extended_rkey         = (uct_cuda_ipc_extended_rkey_t*)rkey_ob->rkey;
+    rkey_handle           = (uct_cuda_ipc_rkey_handle_t*)rkey_ob->handle;
+
+    md_device_mem_element->mapped_offset = UCS_PTR_BYTE_DIFF(
+            extended_rkey->super.d_bptr, rkey_handle->mapped_addr);
     return UCS_OK;
 }
 
@@ -718,26 +741,18 @@ uct_cuda_ipc_md_open(uct_component_t *component, const char *md_name,
 ucs_status_t uct_cuda_ipc_rkey_ptr(uct_component_t *component, uct_rkey_t rkey,
                                    void *handle, uint64_t raddr, void **laddr_p)
 {
-    uct_cuda_ipc_rkey_handle_t *rkey_handle;
-    uct_cuda_ipc_extended_rkey_t *extended_rkey;
     ucs_status_t status;
-    void *mapped_addr;
+    uct_cuda_ipc_extended_rkey_t *extended_rkey;
+    uct_cuda_ipc_rkey_handle_t *rkey_handle;
 
-    rkey_handle   = (uct_cuda_ipc_rkey_handle_t*)handle;
-    extended_rkey = (uct_cuda_ipc_extended_rkey_t*)rkey;
-    if (rkey_handle->mapped_addr != NULL) {
-        goto out;
-    }
-
-    status = uct_cuda_ipc_map_memhandle(extended_rkey, rkey_handle->cu_dev,
-                                        &mapped_addr, UCS_LOG_LEVEL_ERROR);
-    if (ucs_unlikely(status != UCS_OK)) {
+    status = uct_cuda_ipc_md_put_mapped_addr(rkey, handle);
+    if (status != UCS_OK) {
         return status;
     }
 
-    rkey_handle->mapped_addr = mapped_addr;
+    extended_rkey = (uct_cuda_ipc_extended_rkey_t*)rkey;
+    rkey_handle   = (uct_cuda_ipc_rkey_handle_t*)handle;
 
-out:
     *laddr_p = uct_cuda_ipc_get_local_address(&extended_rkey->super, raddr,
                                               rkey_handle->mapped_addr);
     return UCS_OK;

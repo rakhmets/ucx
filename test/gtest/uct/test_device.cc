@@ -146,7 +146,7 @@ UCS_TEST_P(test_device, put)
     uct_device_local_mem_list_elem_t src_elem_host;
     src_elem_host.addr = nullptr;
     ASSERT_UCS_OK(uct_md_mem_elem_pack(m_sender->md(), sendbuf.memh(),
-                                       recvbuf.rkey(),
+                                       recvbuf.rkey_bundle(),
                                        &src_elem_host.uct_mem_element));
 
     mapped_buffer src_elembuf(sizeof(uct_device_local_mem_list_elem_t), 0,
@@ -187,8 +187,8 @@ UCS_TEST_P(test_device, atomic)
                                                       elembuf_host.ptr();
     uct_device_mem_element_t *mem_elem      = (uct_device_mem_element_t*)
                                                       elembuf.ptr();
-    ASSERT_UCS_OK(uct_md_mem_elem_pack(m_sender->md(), nullptr, signal.rkey(),
-                                       mem_elem_host));
+    ASSERT_UCS_OK(uct_md_mem_elem_pack(m_sender->md(), nullptr,
+                                       signal.rkey_bundle(), mem_elem_host));
     ASSERT_EQ(CUDA_SUCCESS, cuMemcpyHtoD((CUdeviceptr)mem_elem, mem_elem_host,
                                          sizeof(uct_device_mem_element_t)));
 
