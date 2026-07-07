@@ -44,7 +44,7 @@ typedef struct {
 
 typedef struct {
     uct_cuda_event_desc_t super;
-    void                  *mapped_addr;
+    const void            *mapped_addr;
     uct_cuda_ipc_ep_t     *ep;
     uintptr_t             d_bptr;
     pid_t                 pid;

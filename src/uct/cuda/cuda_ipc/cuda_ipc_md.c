@@ -490,17 +490,13 @@ err:
 static void uct_cuda_ipc_rkey_release_unmap_memhandle(uct_rkey_t uct_rkey,
                                                       const void *handle)
 {
-    uct_cuda_ipc_rkey_handle_t *rkey_handle;
+    const uct_cuda_ipc_rkey_handle_t *rkey_handle = handle;
     uct_cuda_ipc_unpacked_rkey_t *unpacked_rkey;
     uct_cuda_ipc_extended_rkey_t *extended_rkey;
     uct_cuda_ipc_rkey_t *rkey;
 
-    if ((uct_rkey == 0) || (handle == NULL)) {
-        return;
-    }
-
-    rkey_handle = (uct_cuda_ipc_rkey_handle_t*)handle;
-    if (rkey_handle->mapped_addr == NULL) {
+    if ((uct_rkey == 0) || (rkey_handle == NULL) ||
+        (rkey_handle->mapped_addr == NULL)) {
         return;
     }
 
@@ -711,28 +707,19 @@ uct_cuda_ipc_md_open(uct_component_t *component, const char *md_name,
 ucs_status_t uct_cuda_ipc_rkey_ptr(uct_component_t *component, uct_rkey_t rkey,
                                    void *handle, uint64_t raddr, void **laddr_p)
 {
-    uct_cuda_ipc_rkey_handle_t *rkey_handle;
-    uct_cuda_ipc_extended_rkey_t *extended_rkey;
-    ucs_status_t status;
-    void *mapped_addr;
+    uct_cuda_ipc_rkey_handle_t *rkey_handle     = handle;
+    uct_cuda_ipc_extended_rkey_t *extended_rkey =
+            (uct_cuda_ipc_extended_rkey_t*)rkey;
 
-    rkey_handle   = (uct_cuda_ipc_rkey_handle_t*)handle;
-    extended_rkey = (uct_cuda_ipc_extended_rkey_t*)rkey;
     if (rkey_handle->mapped_addr != NULL) {
         *laddr_p = uct_cuda_ipc_rkey_get_local_address(
                 &extended_rkey->super, raddr, rkey_handle->mapped_addr);
         return UCS_OK;
     }
 
-    status = uct_cuda_ipc_get_remote_address(extended_rkey, raddr,
-                                             rkey_handle->cu_dev, laddr_p,
-                                             &mapped_addr);
-    if (ucs_unlikely(status != UCS_OK)) {
-        return status;
-    }
-
-    rkey_handle->mapped_addr = mapped_addr;
-    return UCS_OK;
+    return uct_cuda_ipc_get_remote_address(extended_rkey, raddr,
+                                           rkey_handle->cu_dev, laddr_p,
+                                           &rkey_handle->mapped_addr);
 }
 
 uct_cuda_ipc_component_t uct_cuda_ipc_component = {

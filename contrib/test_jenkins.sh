@@ -755,10 +755,13 @@ run_mpi_tests() {
 			if [ "X$have_cuda" != "Xno" ] && [ -x ./test/mpi/test_ucp_rkey_destroy ]
 			then
 				echo "==== Running UCP RKEY destroy tests ===="
-				${MPIRUN_COMMON} -np 2 \
-								-x UCX_CUDA_IPC_CACHE=n \
-								-x UCX_RCACHE_ENABLE=n \
-								-x UCX_GDR_COPY_RCACHE=n \
+				# The test checks that after destroying a UCP remote key on the
+				# remote process, the local memory can be released. However, the
+				# internal caches may hold references to the memory, e.g. via
+				# opened CUDA IPC memory handle. All the caches are disabled
+				# to be able to release the memory after the remote key is
+				# destroyed.
+				${MPIRUN_COMMON} -np 2 -x UCX_MEMTYPE_CACHE=n \
 								./test/mpi/test_ucp_rkey_destroy
 			fi
 
