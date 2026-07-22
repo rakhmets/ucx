@@ -21,9 +21,9 @@
 #include <stdlib.h>
 
 #define MPI_COMM_SIZE 2
-#define SIZE          1024 * 1024 * 1024
+#define SIZE          (1024 * 1024 * 1024)
 
-static void rank0(ucp_context_h ucp_context)
+static int rank0(ucp_context_h ucp_context)
 {
     CUdeviceptr ptr;
     ucp_mem_h ucp_mem;
@@ -44,6 +44,7 @@ static void rank0(ucp_context_h ucp_context)
     unreleased_memory = free_bytes_before - free_bytes_after;
     fprintf(stdout, "Unreleased memory: %zu bytes: %s\n", unreleased_memory,
             (unreleased_memory == 0) ? "PASS" : "FAIL");
+    return (unreleased_memory == 0) ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
 static void rank1(ucp_ep_h ucp_ep)
@@ -66,6 +67,7 @@ int main(int argc, char **argv)
     CUdevice cu_dev;
     CUcontext cu_ctx;
     ucp_t ucp;
+    int exit_status;
 
     MPI_Init(&argc, &argv);
     MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
@@ -89,12 +91,12 @@ int main(int argc, char **argv)
     ucp = create_ucp();
 
     if (rank == 0) {
-        rank0(ucp.context);
+        exit_status = rank0(ucp.context);
     } else {
         rank1(ucp.ep);
     }
 
-    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_Bcast(&exit_status, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
     destroy_ucp(ucp);
 
@@ -102,5 +104,5 @@ int main(int argc, char **argv)
     CUDA_CHECK(cuDevicePrimaryCtxRelease(cu_dev));
 
     MPI_Finalize();
-    return EXIT_SUCCESS;
+    return exit_status;
 }
