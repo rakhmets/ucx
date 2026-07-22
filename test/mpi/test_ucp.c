@@ -179,6 +179,11 @@ rkey_t recv_rkey(int peer_rank, ucp_ep_h ep)
              MPI_TAG_PACKED_RKEY_SIZE, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
     packed_rkey = malloc(packed_rkey_size);
+    if (packed_rkey == NULL) {
+        fprintf(stderr, "malloc packed rkey failed\n");
+        exit(EXIT_FAILURE);
+    }
+
     MPI_Recv(packed_rkey, packed_rkey_size, MPI_BYTE, peer_rank,
              MPI_TAG_PACKED_RKEY, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
