@@ -48,6 +48,7 @@ typedef struct {
     uintptr_t    d_bptr;
     void         *mapped_addr;
     CUdevice     cu_dev;
+    int          cache_enabled;
 } uct_cuda_ipc_mem_elem_release_handle_t;
 
 static ucs_config_field_t uct_cuda_ipc_md_config_table[] = {
@@ -785,16 +786,22 @@ static void uct_cuda_ipc_md_close(uct_md_h md)
 
 static ucs_status_t
 uct_cuda_ipc_md_mem_elem_pack(uct_md_h md, uct_mem_h memh, uct_rkey_t rkey,
+                              void *rkey_release_handle,
                               uct_device_mem_elem_t *mem_elem,
                               void **release_handle_p)
 {
     uct_cuda_ipc_unpacked_rkey_t *key = (uct_cuda_ipc_unpacked_rkey_t*)rkey;
     uct_cuda_ipc_md_device_mem_element_t *cuda_ipc_md_mem_element =
             (uct_cuda_ipc_md_device_mem_element_t*)mem_elem;
+    uct_cuda_ipc_rkey_handle_t *cuda_ipc_rkey_handle = rkey_release_handle;
     uct_cuda_ipc_mem_elem_release_handle_t *release_handle;
     ucs_status_t status;
     CUdevice cuda_device;
     void *mapped_addr;
+
+    if ((rkey == UCT_INVALID_RKEY) || (rkey_release_handle == NULL)) {
+        return UCS_ERR_INVALID_PARAM;
+    }
 
     if (UCT_CUDADRV_FUNC_LOG_DEBUG(cuCtxGetDevice(&cuda_device)) != UCS_OK) {
         return UCS_ERR_UNREACHABLE;
@@ -816,12 +823,13 @@ uct_cuda_ipc_md_mem_elem_pack(uct_md_h md, uct_mem_h memh, uct_rkey_t rkey,
     cuda_ipc_md_mem_element->mapped_offset =
             UCS_PTR_BYTE_DIFF(key->super.super.d_bptr, mapped_addr);
 
-    release_handle->pid         = key->super.super.pid;
-    release_handle->pid_ns      = key->super.pid_ns;
-    release_handle->d_bptr      = key->super.super.d_bptr;
-    release_handle->mapped_addr = mapped_addr;
-    release_handle->cu_dev      = cuda_device;
-    *release_handle_p           = release_handle;
+    release_handle->pid           = key->super.super.pid;
+    release_handle->pid_ns        = key->super.pid_ns;
+    release_handle->d_bptr        = key->super.super.d_bptr;
+    release_handle->mapped_addr   = mapped_addr;
+    release_handle->cu_dev        = cuda_device;
+    release_handle->cache_enabled = cuda_ipc_rkey_handle->cache_enabled;
+    *release_handle_p             = release_handle;
 
     return UCS_OK;
 }
@@ -832,7 +840,7 @@ static void uct_cuda_ipc_md_mem_elem_release(uct_md_h md, void *release_handle)
 
     uct_cuda_ipc_unmap_memhandle(handle->pid, handle->pid_ns, handle->d_bptr,
                                  handle->mapped_addr, handle->cu_dev,
-                                 uct_cuda_ipc_component.enable_remote_cache);
+                                 handle->cache_enabled);
     ucs_free(handle);
 }
 

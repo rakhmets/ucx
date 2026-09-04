@@ -1613,14 +1613,17 @@ ucs_status_t uct_rkey_unpack_v2(uct_component_h component,
  *
  * @param [in]  md                Memory domain.
  * @param [in]  memh              Memory handle to pack (can be NULL).
- * @param [in]  rkey              Remote key to pack (can be UCT_INVALID_RKEY).
+ * @param [in]  rkey_ob           Remote key bundle as returned by
+ *                                the @ref uct_rkey_unpack_v2 function
+ *                                (can be NULL).
  * @param [out] mem_elem          Filled with the packed memh and rkey.
  * @param [out] release_handle_p  Handle for releasing resources allocated
  *                                during packing.
  *
  * @return UCS_OK on success or error code in case of failure.
  */
-ucs_status_t uct_md_mem_elem_pack(uct_md_h md, uct_mem_h memh, uct_rkey_t rkey,
+ucs_status_t uct_md_mem_elem_pack(uct_md_h md, uct_mem_h memh,
+                                  const uct_rkey_bundle_t *rkey_ob,
                                   uct_device_mem_elem_t *mem_elem,
                                   void **release_handle_p);
 
