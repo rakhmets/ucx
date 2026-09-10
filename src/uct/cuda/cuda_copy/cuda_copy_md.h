@@ -114,7 +114,7 @@ uct_cuda_copy_md_dmabuf_t uct_cuda_copy_md_get_dmabuf(const void *address,
  * @param [in]     cu_device     CUDA device to allocate memory on
  * @param [in]     length        The minimal size to allocate
  * @param [in,out] granularity_p Allocation granularity, if fabric VMM is used
- * @param [in,out] alloc_handle  Filled with information about the allocated
+ * @param [out]    alloc_handle  Filled with information about the allocated
  *                               memory
  */
 ucs_status_t
