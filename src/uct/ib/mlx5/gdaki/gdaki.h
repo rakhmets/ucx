@@ -44,9 +44,9 @@ typedef struct uct_rc_gdaki_iface {
     pthread_mutex_t            ep_init_lock;
     ucs_mpool_t                channel_pool;
     struct {
-        CUdevice                 dev;
-        CUcontext                ctx;
-        size_t                   alloc_granularity;
+        CUdevice  dev;
+        CUcontext ctx;
+        size_t    alloc_granularity;
     } cuda;
 } uct_rc_gdaki_iface_t;
 
