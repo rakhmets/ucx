@@ -1175,6 +1175,12 @@ void uct_cuda_mem_free(uct_cuda_copy_alloc_handle_t *alloc_handle)
     if (alloc_handle->is_vmm) {
         (void)uct_cuda_copy_mem_release_fabric(alloc_handle);
     } else {
-        (void)UCT_CUDADRV_FUNC_LOG_WARN(cuMemFree(alloc_handle->ptr));
+        /**
+         * https://github.com/openucx/ucx/pull/10606
+         * TODO: The more correct behavior is to issue a warning, provided that
+         *       the context still exists for which memory has been allocated.
+         */
+        (void)UCT_CUDADRV_FUNC(cuMemFree(alloc_handle->ptr),
+                               UCS_LOG_LEVEL_DIAG);
     }
 }
