@@ -138,6 +138,6 @@ void uct_cuda_mem_free(uct_cuda_copy_alloc_handle_t *alloc_handle);
  *
  * @param [in] log_level  Log level for CUDA driver API failures
  */
-ucs_status_t uct_cuda_copy_set_ctx_sync_memops(int log_level);
+ucs_status_t uct_cuda_copy_set_ctx_sync_memops(ucs_log_level_t log_level);
 
 #endif

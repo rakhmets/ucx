@@ -288,7 +288,7 @@ err_mem_release:
 
 typedef CUresult (*uct_cuda_cuCtxSetFlags_t)(unsigned);
 
-ucs_status_t uct_cuda_copy_set_ctx_sync_memops(int log_level)
+ucs_status_t uct_cuda_copy_set_ctx_sync_memops(ucs_log_level_t log_level)
 {
 #if HAVE_CUDA_FABRIC
     static uct_cuda_cuCtxSetFlags_t cuda_cuCtxSetFlags_func =
