@@ -1159,7 +1159,7 @@ uct_cuda_mem_alloc(ucs_log_level_t log_level, ucs_memory_type_t mem_type,
 
     status = UCT_CUDADRV_FUNC(cuMemAlloc(&ptr, length), log_level);
     if (status != UCS_OK) {
-        return status;
+        return UCS_ERR_NO_MEMORY;
     }
 
 set_non_vmm:
