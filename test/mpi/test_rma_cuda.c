@@ -68,6 +68,10 @@ void initiate_rma(int peer_rank, op_type_t op_type, ucp_worker_h ucp_worker,
 {
     ucp_request_param_t ucp_request_param = {0};
     int ack                               = 0;
+    const ucp_rkey_destroy_params_t rkey_destroy_params = {
+        .field_mask = UCP_RKEY_DESTROY_PARAM_FIELD_FLAGS,
+        .flags = UCP_RKEY_DESTROY_FLAG_FREE_UNUSED_MAPPING
+    };
     rkey_t rkey;
 
     rkey = recv_rkey(peer_rank, ucp_ep);
@@ -86,7 +90,7 @@ void initiate_rma(int peer_rank, op_type_t op_type, ucp_worker_h ucp_worker,
 
     MPI_Ssend(&ack, 1, MPI_INT, peer_rank, MPI_TAG_ACK, MPI_COMM_WORLD);
 
-    ucp_rkey_destroy(rkey.rkey);
+    ucp_rkey_destroy_v2(rkey.rkey, &rkey_destroy_params);
 }
 
 void complete_rma(int peer_rank, op_type_t op_type, ucp_context_h ucp_context,

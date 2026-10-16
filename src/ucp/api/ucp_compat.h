@@ -140,6 +140,13 @@ void ucp_rkey_buffer_release(void *rkey_buffer);
 
 
 /**
+ * @ingroup UCP_MEM
+ * @deprecated Replaced by @ref ucp_rkey_destroy_v2.
+ */
+void ucp_rkey_destroy(ucp_rkey_h rkey);
+
+
+/**
  * @ingroup UCP_ENDPOINT
  * @deprecated Replaced by @ref ucp_ep_flush_nb.
  */

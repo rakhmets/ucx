@@ -3317,8 +3317,8 @@ void ucp_memh_buffer_release(void *buffer,
  * buffer.
  *
  * @note The application is responsible for releasing the RKEY object when
- *       it is no longer needed, by calling the @ref ucp_rkey_destroy
- *       "ucp_rkey_destroy()" routine.
+ *       it is no longer needed, by calling the @ref ucp_rkey_destroy_v2
+ *       "ucp_rkey_destroy_v2()" routine.
  * @note The remote key object can be used for communications only on the
  *       endpoint on which it was unpacked.
  *
@@ -3356,6 +3356,51 @@ ucs_status_t ucp_rkey_ptr(ucp_rkey_h rkey, uint64_t raddr, void **addr_p);
 
 /**
  * @ingroup UCP_MEM
+ * @brief Remote key destroy parameters field mask.
+ *
+ * The enumeration allows specifying which fields in
+ * @ref ucp_rkey_destroy_params_t are present.
+ */
+typedef enum {
+    UCP_RKEY_DESTROY_PARAM_FIELD_FLAGS = UCS_BIT(0)
+} ucp_rkey_destroy_params_field_t;
+
+
+/**
+ * @ingroup UCP_MEM
+ * @brief Remote key destroy flags.
+ */
+typedef enum {
+    /**
+     * Free the local mapping of the remote memory, which was created for this
+     * remote key and is not used by any other remote key or operation.
+     */
+    UCP_RKEY_DESTROY_FLAG_FREE_UNUSED_MAPPING = UCS_BIT(0)
+} ucp_rkey_destroy_flags_t;
+
+
+/**
+ * @ingroup UCP_MEM
+ * @brief Remote key destroy parameters passed to @ref ucp_rkey_destroy_v2.
+ */
+typedef struct {
+    /**
+     * Mask of valid fields in this structure, using bits from
+     * @ref ucp_rkey_destroy_params_field_t. Fields not specified in this mask
+     * will be ignored. Provides ABI compatibility with respect to adding new
+     * fields.
+     */
+    uint64_t                field_mask;
+
+    /**
+     * Flags from @ref ucp_rkey_destroy_flags_t.
+     */
+    uint64_t                flags;
+} ucp_rkey_destroy_params_t;
+
+
+/**
+ * @ingroup UCP_MEM
  * @brief Destroy the remote key
  *
  * This routine destroys the RKEY object and the memory that was allocated
@@ -3374,8 +3419,11 @@ ucs_status_t ucp_rkey_ptr(ucp_rkey_h rkey, uint64_t raddr, void **addr_p);
  * is destroyed.
  *
  * @param [in]  rkey         Remote key to destroy.
+ * @param [in]  params       Remote key destroy parameters, as defined by
+ *                           @ref ucp_rkey_destroy_params_t.
  */
-void ucp_rkey_destroy(ucp_rkey_h rkey);
+void ucp_rkey_destroy_v2(ucp_rkey_h rkey,
+                         const ucp_rkey_destroy_params_t *params);
 
 
 /**
