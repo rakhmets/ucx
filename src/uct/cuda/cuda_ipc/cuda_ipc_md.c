@@ -647,13 +647,37 @@ static void uct_cuda_ipc_rkey_release_unmap_memhandle(uct_rkey_t uct_rkey,
                                  uct_cuda_ipc_component.enable_remote_cache);
 }
 
+static ucs_status_t
+uct_cuda_ipc_rkey_release_v2(uct_component_t *component, uct_rkey_t uct_rkey,
+                             void *handle,
+                             const uct_rkey_release_params_t *params)
+{
+    const uct_cuda_ipc_rkey_handle_t *rkey_handle = handle;
+    const uct_cuda_ipc_unpacked_rkey_t *unpacked_rkey;
+    uint64_t flags;
+
+    flags = UCS_PARAM_VALUE(UCT_RKEY_RELEASE_FIELD, params, flags, FLAGS, 0);
+
+    uct_cuda_ipc_rkey_release_unmap_memhandle(uct_rkey, handle);
+
+    if (flags & UCT_RKEY_RELEASE_FLAG_FREE_UNUSED_MAPPING) {
+        unpacked_rkey = (const uct_cuda_ipc_unpacked_rkey_t*)uct_rkey;
+        uct_cuda_ipc_cache_release_unused_region(
+                unpacked_rkey->super.super.pid, unpacked_rkey->super.pid_ns,
+                unpacked_rkey->super.super.d_bptr, rkey_handle->cu_dev);
+    }
+
+    ucs_free(handle);
+    ucs_free((void *)uct_rkey);
+    return UCS_OK;
+}
+
 static ucs_status_t uct_cuda_ipc_rkey_release(uct_component_t *component,
                                               uct_rkey_t rkey, void *handle)
 {
-    uct_cuda_ipc_rkey_release_unmap_memhandle(rkey, handle);
-    ucs_free(handle);
-    ucs_free((void *)rkey);
-    return UCS_OK;
+    const uct_rkey_release_params_t params = {.field_mask = 0};
+
+    return uct_cuda_ipc_rkey_release_v2(component, rkey, handle, &params);
 }
 
 static ucs_status_t
@@ -899,6 +923,7 @@ uct_cuda_ipc_component_t uct_cuda_ipc_component = {
         .rkey_unpack        = uct_cuda_ipc_rkey_unpack,
         .rkey_ptr           = uct_cuda_ipc_rkey_ptr,
         .rkey_release       = uct_cuda_ipc_rkey_release,
+        .rkey_release_v2    = uct_cuda_ipc_rkey_release_v2,
         .rkey_compare       = uct_base_rkey_compare,
         .name               = "cuda_ipc",
         .md_config          = {

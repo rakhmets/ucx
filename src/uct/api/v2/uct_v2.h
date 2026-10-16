@@ -29,6 +29,49 @@ BEGIN_C_DECLS
 */
 
 /**
+ * @ingroup UCT_MD
+ * @brief Rkey release parameters field mask.
+ */
+typedef enum {
+    UCT_RKEY_RELEASE_FIELD_FLAGS = UCS_BIT(0)  /**< flags field */
+} uct_rkey_release_field_mask_t;
+
+
+/**
+ * @ingroup UCT_MD
+ * @brief Rkey release flags.
+ */
+typedef enum {
+    /**
+     * Also free the local mapping of the remote memory that is no longer used
+     * by any other operation, instead of keeping it cached for future use.
+     * This is a hint; components which do not cache mappings ignore it.
+     */
+    UCT_RKEY_RELEASE_FLAG_FREE_UNUSED_MAPPING = UCS_BIT(0)
+} uct_rkey_release_flags_t;
+
+
+/**
+ * @ingroup UCT_MD
+ * @brief Parameters for releasing remote key using @ref uct_rkey_release_v2.
+ */
+typedef struct uct_rkey_release_params {
+    /**
+     * Mask of valid fields in this structure, using bits from
+     * @ref uct_rkey_release_field_mask_t. Fields not specified in this mask
+     * will be ignored. Provides ABI compatibility with respect to adding new
+     * fields.
+     */
+    uint64_t             field_mask;
+
+    /**
+     * Flags from @ref uct_rkey_release_flags_t.
+     */
+    uint64_t             flags;
+} uct_rkey_release_params_t;
+
+
+/**
  * @ingroup UCT_RESOURCE
  * @brief All existing UCT operations
  *
@@ -1584,6 +1627,23 @@ ucs_status_t uct_rkey_unpack_v2(uct_component_h component,
                                 const void *rkey_buffer,
                                 const uct_rkey_unpack_params_t *params,
                                 uct_rkey_bundle_t *rkey_ob);
+
+
+/**
+ * @ingroup UCT_MD
+ *
+ * @brief Release a remote key.
+ *
+ * @param [in]  component    Component which was used to unpack the remote key.
+ * @param [in]  rkey_ob      Remote key to release.
+ * @param [in]  params       Operation parameters, see @ref
+ *                           uct_rkey_release_params_t.
+ *
+ * @return UCS_OK on success or error code in case of failure.
+ */
+ucs_status_t uct_rkey_release_v2(uct_component_h component,
+                                 const uct_rkey_bundle_t *rkey_ob,
+                                 const uct_rkey_release_params_t *params);
 
 
 /**
