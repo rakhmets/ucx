@@ -49,13 +49,17 @@ static int rank0(ucp_context_h ucp_context)
 
 static void rank1(ucp_ep_h ucp_ep)
 {
+    const ucp_rkey_destroy_params_t rkey_destroy_params = {
+        .field_mask = UCP_RKEY_DESTROY_PARAM_FIELD_FLAGS,
+        .flags = UCP_RKEY_DESTROY_FLAG_FREE_UNUSED_MAPPING
+    };
     rkey_t rkey;
     void *ptr;
 
     rkey = recv_rkey(0, ucp_ep);
 
     UCX_CHECK(ucp_rkey_ptr(rkey.rkey, rkey.remote_address, &ptr));
-    ucp_rkey_destroy(rkey.rkey);
+    ucp_rkey_destroy_v2(rkey.rkey, &rkey_destroy_params);
 
     MPI_Barrier(MPI_COMM_WORLD);
 }

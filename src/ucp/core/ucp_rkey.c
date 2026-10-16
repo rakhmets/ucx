@@ -1131,7 +1131,8 @@ ucs_status_t ucp_rkey_ptr(ucp_rkey_h rkey, uint64_t raddr, void **addr_p)
     return UCS_ERR_UNREACHABLE;
 }
 
-void ucp_rkey_destroy(ucp_rkey_h rkey)
+void ucp_rkey_destroy_v2(ucp_rkey_h rkey,
+                         const ucp_rkey_destroy_params_t *params)
 {
     unsigned remote_md_index, rkey_index;
     ucp_worker_h UCS_V_UNUSED worker;
@@ -1154,6 +1155,13 @@ void ucp_rkey_destroy(ucp_rkey_h rkey)
     } else {
         ucs_free(rkey);
     }
+}
+
+void ucp_rkey_destroy(ucp_rkey_h rkey)
+{
+    const ucp_rkey_destroy_params_t params = {.field_mask = 0};
+
+    ucp_rkey_destroy_v2(rkey, &params);
 }
 
 ucp_lane_index_t ucp_rkey_find_rma_lane(ucp_context_h context,
