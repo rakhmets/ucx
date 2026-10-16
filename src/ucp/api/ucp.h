@@ -3379,6 +3379,72 @@ void ucp_rkey_destroy(ucp_rkey_h rkey);
 
 
 /**
+ * @ingroup UCP_MEM
+ * @brief Remote key destroy parameters field mask.
+ *
+ * The enumeration allows specifying which fields in
+ * @ref ucp_rkey_destroy_params_t are present.
+ */
+typedef enum {
+    UCP_RKEY_DESTROY_PARAM_FIELD_FLAGS = UCS_BIT(0)  /**< flags field */
+} ucp_rkey_destroy_params_field_t;
+
+
+/**
+ * @ingroup UCP_MEM
+ * @brief Remote key destroy flags.
+ */
+typedef enum {
+    /**
+     * Also free the local mapping of the remote memory, which was created for
+     * this remote key and is not used by any other remote key or operation,
+     * instead of keeping it cached for future use. Use it when the remote
+     * memory is no longer going to be accessed, for example when the remote
+     * peer is removed or its buffer is deregistered. This is a hint, and
+     * transports which do not cache such mappings ignore it.
+     */
+    UCP_RKEY_DESTROY_FLAG_FREE_UNUSED_MAPPING = UCS_BIT(0)
+} ucp_rkey_destroy_flags_t;
+
+
+/**
+ * @ingroup UCP_MEM
+ * @brief Remote key destroy parameters passed to @ref ucp_rkey_destroy_v2.
+ */
+typedef struct ucp_rkey_destroy_params {
+    /**
+     * Mask of valid fields in this structure, using bits from
+     * @ref ucp_rkey_destroy_params_field_t. Fields not specified in this mask
+     * will be ignored. Provides ABI compatibility with respect to adding new
+     * fields.
+     */
+    uint64_t                field_mask;
+
+    /**
+     * Flags from @ref ucp_rkey_destroy_flags_t.
+     */
+    uint64_t                flags;
+} ucp_rkey_destroy_params_t;
+
+
+/**
+ * @ingroup UCP_MEM
+ * @brief Destroy the remote key with additional parameters.
+ *
+ * This routine behaves like @ref ucp_rkey_destroy "ucp_rkey_destroy()", and
+ * additionally allows to control the release of resources associated with the
+ * RKEY object by the @a params argument. All warnings of
+ * @ref ucp_rkey_destroy "ucp_rkey_destroy()" apply.
+ *
+ * @param [in]  rkey         Remote key to destroy.
+ * @param [in]  params       Remote key destroy parameters, as defined by
+ *                           @ref ucp_rkey_destroy_params_t.
+ */
+void ucp_rkey_destroy_v2(ucp_rkey_h rkey,
+                         const ucp_rkey_destroy_params_t *params);
+
+
+/**
  * @ingroup UCP_WORKER
  * @brief Add user defined callback for Active Message.
  *
