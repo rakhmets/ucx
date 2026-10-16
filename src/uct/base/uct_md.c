@@ -380,6 +380,18 @@ ucs_status_t uct_rkey_release(uct_component_h component,
     return component->rkey_release(component, rkey_ob->rkey, rkey_ob->handle);
 }
 
+ucs_status_t uct_rkey_release_v2(uct_component_h component,
+                                 const uct_rkey_bundle_t *rkey_ob,
+                                 const uct_rkey_release_params_t *params)
+{
+    if (component->rkey_release_v2 == NULL) {
+        return uct_rkey_release(component, rkey_ob);
+    }
+
+    return component->rkey_release_v2(component, rkey_ob->rkey, rkey_ob->handle,
+                                      params);
+}
+
 ucs_status_t uct_base_rkey_compare(uct_component_t *component, uct_rkey_t rkey1,
                                    uct_rkey_t rkey2,
                                    const uct_rkey_compare_params_t *params,

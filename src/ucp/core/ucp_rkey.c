@@ -1134,14 +1134,23 @@ ucs_status_t ucp_rkey_ptr(ucp_rkey_h rkey, uint64_t raddr, void **addr_p)
 void ucp_rkey_destroy_v2(ucp_rkey_h rkey,
                          const ucp_rkey_destroy_params_t *params)
 {
+    uct_rkey_release_params_t uct_params = {.field_mask = 0};
     unsigned remote_md_index, rkey_index;
     ucp_worker_h UCS_V_UNUSED worker;
+    uint64_t flags;
+
+    flags = UCS_PARAM_VALUE(UCP_RKEY_DESTROY_PARAM_FIELD, params, flags, FLAGS,
+                            0);
+    if (flags & UCP_RKEY_DESTROY_FLAG_FREE_UNUSED_MAPPING) {
+        uct_params.field_mask = UCT_RKEY_RELEASE_FIELD_FLAGS;
+        uct_params.flags      = UCT_RKEY_RELEASE_FLAG_FREE_UNUSED_MAPPING;
+    }
 
     rkey_index = 0;
     ucs_for_each_bit(remote_md_index, rkey->md_map) {
         if (rkey->tl_rkey[rkey_index].rkey.rkey != UCT_INVALID_RKEY) {
-            uct_rkey_release(rkey->tl_rkey[rkey_index].cmpt,
-                             &rkey->tl_rkey[rkey_index].rkey);
+            uct_rkey_release_v2(rkey->tl_rkey[rkey_index].cmpt,
+                                &rkey->tl_rkey[rkey_index].rkey, &uct_params);
         }
         ++rkey_index;
     }

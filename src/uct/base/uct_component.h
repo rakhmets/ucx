@@ -137,6 +137,24 @@ typedef ucs_status_t (*uct_component_rkey_release_func_t)(
 
 
 /**
+ * Optional component method to release an unpacked remote key with parameters.
+ * If not set, @ref uct_component_rkey_release_func_t is used.
+ *
+ * @param [in]  component               Release the remote key of this
+ *                                      component.
+ * @param [in]  rkey                    Release this remote key.
+ * @param [in]  handle                  Remote key handle, as returned from
+ *                                      @ref uct_component_rkey_unpack_func_t.
+ * @param [in]  params                  Parameters for the release.
+ *
+ * @return UCS_OK on success or error code in case of failure.
+ */
+typedef ucs_status_t (*uct_component_rkey_release_v2_func_t)(
+                uct_component_t *component, uct_rkey_t rkey, void *handle,
+                const uct_rkey_release_params_t *params);
+
+
+/**
  * Component method to compare two unpacked remote keys
  *
  * @param [in]  component               Compare remote keys on this component
@@ -176,6 +194,8 @@ struct uct_component {
     uct_component_rkey_unpack_func_t        rkey_unpack;        /**< Remote key unpack method */
     uct_component_rkey_ptr_func_t           rkey_ptr;           /**< Remote key access pointer method */
     uct_component_rkey_release_func_t       rkey_release;       /**< Remote key release method */
+    uct_component_rkey_release_v2_func_t    rkey_release_v2;    /**< Remote key release method
+                                                                     with parameters (optional) */
     uct_component_rkey_compare_func_t       rkey_compare;       /**< Remote key comparison method */
     ucs_config_global_list_entry_t          md_config;          /**< MD configuration entry */
     ucs_config_global_list_entry_t          cm_config;          /**< CM configuration entry */
