@@ -40,8 +40,13 @@ typedef struct {
     /* The host fails over failed QPs, see UCT_EP_PARAM_FLAG_FAILOVER */
     uint8_t                      failover;
     uint8_t                      log_path_mtu;
+    /* Set by the host while it fails over, see uct_ep_failover_pause() */
+    uint8_t                      paused;
+    /* Set by the host when a QP failed with an error that failover does not
+     * handle, so the device reports it instead of waiting */
+    uint8_t                      error;
 
-    uint8_t                      pad[29];
+    uint8_t                      pad[27];
 
     uct_rc_gdaki_dev_qp_t        qps[0];
 } uct_rc_gdaki_dev_ep_t;

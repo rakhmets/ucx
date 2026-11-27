@@ -33,6 +33,10 @@ UCS_F_DEVICE T uct_rc_mlx5_load_const(const T *ptr) {
 #endif
 }
 
+/* How long a device operation waits for failover of a failed QP, in clock
+ * cycles, about 2 minutes on current GPUs */
+#define UCT_RC_GDA_FAILOVER_WAIT_CYCLES 160000000000ll
+
 UCS_F_DEVICE uint32_t uct_rc_mlx5_gda_wqe_idx_inc_mask(uint32_t wqe_idx,
                                                        uint32_t increment)
 {
@@ -91,16 +95,59 @@ UCS_F_DEVICE uint64_t uct_rc_mlx5_gda_max_alloc_wqe_base(
         uct_rc_gdaki_dev_ep_t *ep, unsigned cid, unsigned count)
 {
     uint16_t wqe_cnt;
+    uint8_t opcode;
     uint64_t pi;
 
-    pi = uct_rc_mlx5_gda_parse_cqe(ep, cid, &wqe_cnt, nullptr);
+    pi = uct_rc_mlx5_gda_parse_cqe(ep, cid, &wqe_cnt, &opcode);
+
+    /* With failover, the counter of an error completion is the failed or a
+     * flushed WQE, not the last completed one. The slots of the WQEs the host
+     * moves must not be reused, so there is no room. The opcode is read with
+     * the counter, in case the completion turned to an error after
+     * uct_rc_mlx5_gda_failover_blocked(). */
+    if ((opcode == MLX5_CQE_REQ_ERR) &&
+        uct_rc_mlx5_load_const(&ep->failover) && !READ_ONCE(ep->error)) {
+        return 0;
+    }
+
     return pi + ep->sq_wqe_num + 1 - count;
+}
+
+/*
+ * With failover, the host moves the WQEs of a failed endpoint to another one.
+ * Stop posting to a QP once its error completion shows, and to every QP while
+ * the host pauses the endpoint, so the WQEs the host moves are not
+ * overwritten.
+ */
+UCS_F_DEVICE bool
+uct_rc_mlx5_gda_failover_blocked(uct_rc_gdaki_dev_ep_t *ep, unsigned cid)
+{
+    uct_rc_gdaki_dev_qp_t *qp = uct_rc_mlx5_gda_get_qp(ep, cid);
+    auto *cqe64               = reinterpret_cast<mlx5_cqe64*>(qp->cq_buff);
+    cuda::atomic_ref<uint32_t, cuda::thread_scope_system> cqe_ref(
+            *reinterpret_cast<uint32_t*>(&cqe64->wqe_counter));
+
+    if (!uct_rc_mlx5_load_const(&ep->failover)) {
+        return false;
+    }
+
+    if ((cqe_ref.load(cuda::std::memory_order_acquire) >> 28) ==
+        MLX5_CQE_REQ_ERR) {
+        return !READ_ONCE(ep->error);
+    }
+
+    return READ_ONCE(ep->paused);
 }
 
 UCS_F_DEVICE uint64_t uct_rc_mlx5_gda_reserv_wqe_thread(
         uct_rc_gdaki_dev_ep_t *ep, unsigned cid, unsigned count)
 {
     uct_rc_gdaki_dev_qp_t *qp = uct_rc_mlx5_gda_get_qp(ep, cid);
+
+    if (uct_rc_mlx5_gda_failover_blocked(ep, cid)) {
+        return UCT_RC_GDA_RESV_WQE_NO_RESOURCE;
+    }
+
     /* Do not attempt to reserve if the available space is less than the
      * requested count, to avoid starvation of threads trying to rollback the
      * reservation with atomicCAS. */
@@ -405,6 +452,23 @@ UCS_F_DEVICE ucs_status_t uct_rc_mlx5_gda_check_cqe(uct_rc_gdaki_dev_ep_t *ep,
 
     if (opcode != MLX5_CQE_REQ_ERR) {
         return UCS_OK;
+    }
+
+    /* With failover, wait until the host moves the lost WQEs, and the
+     * completions it writes replace the error completion, unless the host
+     * finds an error that failover does not handle */
+    if (uct_rc_mlx5_load_const(&ep->failover)) {
+        const long long start = clock64();
+        do {
+            if (READ_ONCE(ep->error)) {
+                break;
+            }
+
+            pi = uct_rc_mlx5_gda_parse_cqe(ep, cid, &wqe_cnt, &opcode);
+            if (opcode != MLX5_CQE_REQ_ERR) {
+                return (pi < margin) ? UCS_INPROGRESS : UCS_OK;
+            }
+        } while ((clock64() - start) < UCT_RC_GDA_FAILOVER_WAIT_CYCLES);
     }
 
     wqe_idx = wqe_cnt & (ep->sq_wqe_num - 1);
