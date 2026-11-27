@@ -226,6 +226,7 @@ uct_rocm_ipc_ep_get_device_ep(uct_ep_h tl_ep, uct_device_ep_h *device_ep_p)
     }
 
     device_ep.uct_tl_id = UCT_DEVICE_TL_ROCM_IPC;
+    device_ep.flags     = 0;
 
     /* Get memory pool for device allocation */
     status = uct_rocm_base_get_last_device_pool(&pool);

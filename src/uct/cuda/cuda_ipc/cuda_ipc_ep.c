@@ -493,6 +493,7 @@ ucs_status_t uct_cuda_ipc_ep_get_device_ep(uct_ep_h tl_ep,
     }
 
     device_ep.uct_tl_id = UCT_DEVICE_TL_CUDA_IPC;
+    device_ep.flags     = 0;
     status = UCT_CUDADRV_FUNC_LOG_ERR(
             cuMemAlloc((CUdeviceptr *)&ep->device_ep, sizeof(uct_device_ep_t)));
     if (status != UCS_OK) {

@@ -2081,6 +2081,93 @@ uct_ep_outstanding_purge(uct_ep_h ep,
                          const uct_ep_outstanding_purge_params_t *params);
 
 
+/**
+ * @ingroup UCT_RESOURCE
+ * @brief Pause a failed endpoint, to fail it over.
+ *
+ * Stops the endpoint from sending and from receiving, and makes new device
+ * operations on it wait. The endpoint keeps the operations which the peer did
+ * not receive, to send them on another endpoint in
+ * @ref uct_ep_failover_move.
+ *
+ * Both peers pause their endpoints, and exchange the RX tokens, which tell
+ * what each one received from the other.
+ *
+ * @param [in]    ep                 Endpoint created with
+ *                                   @ref UCT_EP_PARAM_FLAG_FAILOVER.
+ * @param [out]   rx_token           Filled with the RX token.
+ * @param [inout] rx_token_length_p  In: size of @a rx_token. Out: length of
+ *                                   the RX token.
+ *
+ * @return UCS_OK                when paused.
+ * @return UCS_ERR_NO_RESOURCE   when not paused yet, call again later.
+ * @return UCS_ERR_UNSUPPORTED   if the transport does not support it.
+ */
+ucs_status_t uct_ep_failover_pause(uct_ep_h ep, void *rx_token,
+                                   size_t *rx_token_length_p);
+
+
+/**
+ * @ingroup UCT_RESOURCE
+ * @brief Translate a memory key of an endpoint to the key of the same memory
+ *        for another endpoint, see @ref uct_ep_failover_move.
+ *
+ * @param [in]  arg        User argument.
+ * @param [in]  is_remote  Whether @a key is a remote key or a local key.
+ * @param [in]  key        Key of the failed endpoint, as packed in its device
+ *                         memory element.
+ * @param [out] key_p      Key for the other endpoint.
+ *
+ * @return UCS_OK, or UCS_ERR_NO_ELEM if the key is unknown.
+ */
+typedef ucs_status_t (*uct_ep_failover_key_cb_t)(void *arg, int is_remote,
+                                                 uint32_t key,
+                                                 uint32_t *key_p);
+
+
+/**
+ * @ingroup UCT_RESOURCE
+ * @brief Move the operations of a paused endpoint to another endpoint.
+ *
+ * Sends the operations the peer did not receive, according to its RX token,
+ * on @a to_ep instead, completes the operations of @a ep once they complete,
+ * and marks the device endpoint of @a ep with @ref UCT_DEVICE_EP_FLAG_FAILED,
+ * so device operations use @a to_ep. Each channel of @a ep moves to the same
+ * channel of @a to_ep, after the operations already posted there.
+ *
+ * @param [in] ep                    Endpoint paused by
+ *                                   @ref uct_ep_failover_pause.
+ * @param [in] to_ep                 Connected endpoint of the same transport.
+ * @param [in] peer_rx_token         RX token of the peer endpoint of @a ep.
+ * @param [in] peer_rx_token_length  Length of @a peer_rx_token.
+ * @param [in] key_cb                Translates the memory keys.
+ * @param [in] arg                   Argument for @a key_cb.
+ *
+ * @return UCS_OK                when moved and completed.
+ * @return UCS_ERR_NO_RESOURCE   when not done yet, call again later.
+ * @return Other error code on failure.
+ */
+ucs_status_t uct_ep_failover_move(uct_ep_h ep, uct_ep_h to_ep,
+                                  const void *peer_rx_token,
+                                  size_t peer_rx_token_length,
+                                  uct_ep_failover_key_cb_t key_cb, void *arg);
+
+
+/**
+ * @ingroup UCT_RESOURCE
+ * @brief Fail a failed endpoint, which cannot fail over.
+ *
+ * Stops the endpoint from sending and from receiving, and makes device
+ * operations on it fail instead of waiting for failover. The endpoint may be
+ * paused by @ref uct_ep_failover_pause, but not moved.
+ *
+ * @param [in] ep  Endpoint created with @ref UCT_EP_PARAM_FLAG_FAILOVER.
+ *
+ * @return UCS_OK on success, or an error code.
+ */
+ucs_status_t uct_ep_failover_fail(uct_ep_h ep);
+
+
 END_C_DECLS
 
 #endif

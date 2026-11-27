@@ -992,8 +992,30 @@ enum uct_ep_params_field {
     UCT_EP_PARAM_FIELD_DEV_ADDR_LENGTH            = UCS_BIT(17),
 
     /** Enables @ref uct_ep_params::iface_addr_length */
-    UCT_EP_PARAM_FIELD_IFACE_ADDR_LENGTH          = UCS_BIT(18)
+    UCT_EP_PARAM_FIELD_IFACE_ADDR_LENGTH          = UCS_BIT(18),
+
+    /** Enables @ref uct_ep_params::flags */
+    UCT_EP_PARAM_FIELD_FLAGS                      = UCS_BIT(19)
 };
+
+
+/**
+ * @ingroup UCT_RESOURCE
+ * @brief UCT endpoint creation flags, used in @ref uct_ep_params::flags.
+ */
+typedef enum {
+    /**
+     * The caller handles a failure of the endpoint with
+     * @ref uct_ep_failover_pause, then moves its operations to another
+     * endpoint with @ref uct_ep_failover_move. Until then, device operations
+     * on the endpoint wait instead of failing. This applies to failures reported
+     * with @ref UCS_ERR_ENDPOINT_TIMEOUT, where the transport retries ran
+     * out. Other errors, such as an invalid memory key, fail the device
+     * operations as without this flag, as does
+     * @ref uct_ep_failover_fail when the caller cannot fail over.
+     */
+    UCT_EP_PARAM_FLAG_FAILOVER = UCS_BIT(0)
+} uct_ep_param_flags_t;
 
 
 /**
@@ -1468,6 +1490,11 @@ struct uct_ep_params {
      * default minimum length according to the address buffer contents.
      */
     size_t                              iface_addr_length;
+
+    /**
+     * Endpoint flags, bits from @ref uct_ep_param_flags_t.
+     */
+    uint64_t                            flags;
 };
 
 

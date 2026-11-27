@@ -881,6 +881,46 @@ uct_ep_outstanding_purge(uct_ep_h ep,
     return iface->internal_ops->ep_outstanding_purge(ep, params);
 }
 
+ucs_status_t uct_ep_failover_pause(uct_ep_h ep, void *rx_token,
+                                   size_t *rx_token_length_p)
+{
+    const uct_base_iface_t *iface = ucs_derived_of(ep->iface, uct_base_iface_t);
+
+    if (iface->internal_ops->ep_failover_pause == NULL) {
+        return UCS_ERR_UNSUPPORTED;
+    }
+
+    return iface->internal_ops->ep_failover_pause(ep, rx_token,
+                                                  rx_token_length_p);
+}
+
+ucs_status_t uct_ep_failover_move(uct_ep_h ep, uct_ep_h to_ep,
+                                  const void *peer_rx_token,
+                                  size_t peer_rx_token_length,
+                                  uct_ep_failover_key_cb_t key_cb, void *arg)
+{
+    const uct_base_iface_t *iface = ucs_derived_of(ep->iface, uct_base_iface_t);
+
+    if (iface->internal_ops->ep_failover_move == NULL) {
+        return UCS_ERR_UNSUPPORTED;
+    }
+
+    return iface->internal_ops->ep_failover_move(ep, to_ep, peer_rx_token,
+                                                 peer_rx_token_length, key_cb,
+                                                 arg);
+}
+
+ucs_status_t uct_ep_failover_fail(uct_ep_h ep)
+{
+    const uct_base_iface_t *iface = ucs_derived_of(ep->iface, uct_base_iface_t);
+
+    if (iface->internal_ops->ep_failover_fail == NULL) {
+        return UCS_ERR_UNSUPPORTED;
+    }
+
+    return iface->internal_ops->ep_failover_fail(ep);
+}
+
 void uct_ep_set_iface(uct_ep_h ep, uct_iface_t *iface)
 {
     ep->iface = iface;

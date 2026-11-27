@@ -332,6 +332,22 @@ typedef ucs_status_t (*uct_ep_outstanding_purge_func_t)(
         uct_ep_h ep, const uct_ep_outstanding_purge_params_t *params);
 
 
+/* Pause a failed endpoint, to fail it over */
+typedef ucs_status_t (*uct_ep_failover_pause_func_t)(
+        uct_ep_h ep, void *rx_token, size_t *rx_token_length_p);
+
+
+/* Move the operations of a paused endpoint to another endpoint */
+typedef ucs_status_t (*uct_ep_failover_move_func_t)(
+        uct_ep_h ep, uct_ep_h to_ep, const void *peer_rx_token,
+        size_t peer_rx_token_length, uct_ep_failover_key_cb_t key_cb,
+        void *arg);
+
+
+/* Fail a failed endpoint, which cannot fail over */
+typedef ucs_status_t (*uct_ep_failover_fail_func_t)(uct_ep_h ep);
+
+
 /* Register an endpoint-specific event handler. */
 typedef ucs_status_t (*uct_iface_set_ep_event_func_t)(
         uct_iface_h iface, const uct_iface_set_ep_event_params_t *params);
@@ -351,6 +367,9 @@ typedef struct uct_iface_internal_ops {
     uct_ep_put_sgl_zcopy_func_t      ep_put_sgl_zcopy;
     uct_ep_get_sgl_zcopy_func_t      ep_get_sgl_zcopy;
     uct_ep_outstanding_purge_func_t  ep_outstanding_purge;
+    uct_ep_failover_pause_func_t     ep_failover_pause;
+    uct_ep_failover_move_func_t      ep_failover_move;
+    uct_ep_failover_fail_func_t      ep_failover_fail;
     uct_iface_set_ep_event_func_t    iface_set_ep_event_handler;
 } uct_iface_internal_ops_t;
 

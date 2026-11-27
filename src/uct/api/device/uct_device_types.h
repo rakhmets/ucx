@@ -81,9 +81,18 @@ typedef enum {
 } uct_device_tl_id_t;
 
 
+/* Device endpoint flags */
+typedef enum {
+    /* The endpoint failed and was replaced by failover, operations must use
+     * another endpoint */
+    UCT_DEVICE_EP_FLAG_FAILED = UCS_BIT(0)
+} uct_device_ep_flags_t;
+
+
 /* Base class for all device endpoints */
 typedef struct uct_device_ep {
     uint8_t uct_tl_id; /* Defined in uct_device_tl_id_t */
+    uint8_t flags;     /* Bits from uct_device_ep_flags_t */
 } uct_device_ep_t;
 
 
