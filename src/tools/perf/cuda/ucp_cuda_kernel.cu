@@ -473,6 +473,8 @@ public:
         } else if (my_index == 0) {
             ucp_perf_cuda_wait_bw_kernel<<<1, 1>>>(
                     *m_gpu_ctx, params_handler.get_params());
+            CUDA_CALL_RET(UCS_ERR_NO_DEVICE, cudaGetLastError);
+            wait_for_kernel_end();
         }
 
         CUDA_CALL_RET(UCS_ERR_IO_ERROR, cudaDeviceSynchronize);

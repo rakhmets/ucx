@@ -197,7 +197,17 @@ public:
             }
             last_completed = completed;
             completed      = m_cpu_ctx->completed_iters;
+            progress();
             // TODO: use cuStreamWaitValue64 if available
+            usleep(100);
+        }
+    }
+
+    /* Wait for a kernel which does not report progress */
+    void wait_for_kernel_end()
+    {
+        while (cudaStreamQuery(0) == cudaErrorNotReady) {
+            progress();
             usleep(100);
         }
     }
@@ -208,6 +218,15 @@ protected:
     ucx_perf_cuda_context *m_gpu_ctx;
 
 private:
+    /* Host progress is needed while a kernel runs, for example to handle a
+     * failure of a device lane */
+    void progress()
+    {
+        if (m_perf.params.api == UCX_PERF_API_UCP) {
+            ucp_worker_progress(m_perf.ucp.worker);
+        }
+    }
+
     void init_ctx()
     {
         CUDA_CALL(, UCS_LOG_LEVEL_FATAL, cudaHostAlloc, &m_cpu_ctx,
