@@ -31,10 +31,21 @@ typedef struct {
 UCS_ARRAY_DECLARE_TYPE(ucp_device_mem_elem_release_handles_t, unsigned,
                        ucp_device_mem_elem_release_handle_t);
 
+/* Host copy of the keys of a memory list, to translate the keys of a failed
+ * device lane to the keys of another lane */
+typedef struct {
+    void            *handle;    /* Host copy of the memory list */
+    size_t          elem_size;  /* Size of an element */
+    int             is_remote;  /* Remote or local memory list */
+    unsigned        num_lanes;  /* Number of lanes of an element */
+    ucp_rsc_index_t rscs[UCP_MAX_LANES]; /* Resource of each lane */
+} ucp_device_mem_list_keys_t;
+
 typedef struct {
     uct_allocated_memory_t                mem;
     uint32_t                              mem_list_length;
     ucp_device_mem_elem_release_handles_t release_handles;
+    ucp_device_mem_list_keys_t            keys;
 } ucp_device_handle_info_t;
 
 #define ucp_device_handle_hash_key(_handle) \
@@ -102,7 +113,8 @@ static void ucp_device_mem_elem_release_handles_cleanup(
 
 static ucs_status_t ucp_device_mem_handle_hash_insert(
         const uct_allocated_memory_t *mem_handle, uint32_t mem_list_length,
-        ucp_device_mem_elem_release_handles_t *release_handles)
+        ucp_device_mem_elem_release_handles_t *release_handles,
+        ucp_device_mem_list_keys_t *keys)
 {
     ucs_status_t status;
     khiter_t iter;
@@ -112,6 +124,7 @@ static ucs_status_t ucp_device_mem_handle_hash_insert(
     info.mem             = *mem_handle;
     info.mem_list_length = mem_list_length;
     info.release_handles = *release_handles;
+    info.keys            = *keys;
 
     ucs_spin_lock(&ucp_device_handle_hash_lock);
     iter = kh_put(ucp_device_handle_allocs, &ucp_device_handle_hash,
@@ -125,8 +138,9 @@ static ucs_status_t ucp_device_mem_handle_hash_insert(
     } else {
         kh_value(&ucp_device_handle_hash, iter) = info;
         status                                  = UCS_OK;
-        /* Ownership of the array moved to the hash */
+        /* Ownership of the array and the keys moved to the hash */
         ucs_array_init_dynamic(release_handles);
+        keys->handle = NULL;
     }
 
     ucs_spin_unlock(&ucp_device_handle_hash_lock);
@@ -221,6 +235,35 @@ ucp_device_get_tl_bitmap(const ucp_worker_h worker,
     }
 }
 
+/* Keep the host copy of a memory list, the lanes of an element are the
+ * resources of the bitmap, in order, repeated up to num_lanes */
+static void ucp_device_mem_list_keys_init(ucp_device_mem_list_keys_t *keys,
+                                          void *handle, size_t header_size,
+                                          size_t elem_size, int is_remote,
+                                          unsigned num_lanes,
+                                          const ucp_tl_bitmap_t *tl_bitmap)
+{
+    unsigned i = 0;
+    ucp_rsc_index_t tl_id;
+
+    keys->handle    = handle;
+    keys->elem_size = elem_size;
+    keys->is_remote = is_remote;
+    keys->num_lanes = ucs_min(num_lanes, UCP_MAX_LANES);
+    while (i < keys->num_lanes) {
+        UCP_TL_BITMAP_FOR_EACH_BIT(tl_id, tl_bitmap) {
+            if (i < keys->num_lanes) {
+                keys->rscs[i++] = tl_id;
+            }
+        }
+    }
+
+    /* The elements follow the header */
+    ucs_assert(header_size == (is_remote ?
+                               sizeof(ucp_device_remote_mem_list_t) :
+                               sizeof(ucp_device_local_mem_list_t)));
+}
+
 static ucs_status_t ucp_device_local_mem_list_element_pack(
         const ucp_worker_h worker, const ucp_worker_iface_t *wiface,
         const ucp_device_mem_list_elem_t *element,
@@ -293,7 +336,8 @@ static ucs_status_t ucp_device_mem_list_export_handle(
 static ucs_status_t ucp_device_local_mem_list_create_handle(
         const ucp_device_mem_list_params_t *params, ucs_memory_type_t mem_type,
         ucs_sys_device_t local_sys_dev, uct_allocated_memory_t *mem,
-        ucp_device_mem_elem_release_handles_t *release_handles)
+        ucp_device_mem_elem_release_handles_t *release_handles,
+        ucp_device_mem_list_keys_t *keys)
 {
     const ucp_worker_h worker   = UCS_PARAM_VALUE(
             UCP_DEVICE_MEM_LIST_PARAMS_FIELD, params, worker, WORKER, NULL);
@@ -357,6 +401,12 @@ static ucs_status_t ucp_device_local_mem_list_create_handle(
     status          = ucp_device_mem_list_export_handle(
             worker, handle, handle_size, mem_type, local_sys_dev, mem,
             "ucp_device_local_mem_list_handle_t");
+    if (status == UCS_OK) {
+        ucp_device_mem_list_keys_init(keys, handle, sizeof(*handle),
+                                      uct_elem_size, 0, num_lanes,
+                                      &tl_bitmap[tl_type]);
+        return UCS_OK;
+    }
 
 out:
     ucs_free(handle);
@@ -435,6 +485,7 @@ ucp_device_local_mem_list_create(const ucp_device_mem_list_params_t *params,
             UCS_ARRAY_DYNAMIC_INITIALIZER;
     const ucp_worker_h worker = UCS_PARAM_VALUE(UCP_DEVICE_MEM_LIST_PARAMS_FIELD,
                                                params, worker, WORKER, NULL);
+    ucp_device_mem_list_keys_t keys = {};
     ucs_memory_type_t export_mem_type;
     ucs_sys_device_t local_sys_dev;
     uct_allocated_memory_t mem;
@@ -462,7 +513,7 @@ ucp_device_local_mem_list_create(const ucp_device_mem_list_params_t *params,
 
     status = ucp_device_local_mem_list_create_handle(params, export_mem_type,
                                                      local_sys_dev, &mem,
-                                                     &release_handles);
+                                                     &release_handles, &keys);
     if (status != UCS_OK) {
         ucs_error("failed to create local mem list handle: %s",
                   ucs_status_string(status));
@@ -471,7 +522,7 @@ ucp_device_local_mem_list_create(const ucp_device_mem_list_params_t *params,
 
     /* Track memory allocator for later release */
     status = ucp_device_mem_handle_hash_insert(&mem, params->num_elements,
-                                               &release_handles);
+                                               &release_handles, &keys);
     if (status != UCS_OK) {
         uct_mem_free(&mem);
         goto err;
@@ -482,6 +533,7 @@ ucp_device_local_mem_list_create(const ucp_device_mem_list_params_t *params,
 
 err:
     ucp_device_mem_elem_release_handles_cleanup(&release_handles);
+    ucs_free(keys.handle);
     return status;
 }
 
@@ -655,7 +707,8 @@ static ucs_status_t ucp_device_remote_mem_list_create_handle(
         const ucp_device_mem_list_params_t *params, ucp_ep_h ep,
         ucs_memory_type_t mem_type, ucs_sys_device_t local_sys_dev,
         uct_allocated_memory_t *mem,
-        ucp_device_mem_elem_release_handles_t *release_handles)
+        ucp_device_mem_elem_release_handles_t *release_handles,
+        ucp_device_mem_list_keys_t *keys)
 {
     size_t uct_elem_size;
     size_t handle_size         = 0;
@@ -730,6 +783,13 @@ static ucs_status_t ucp_device_remote_mem_list_create_handle(
     status            = ucp_device_mem_list_export_handle(
             ep->worker, handle, handle_size, mem_type, local_sys_dev, mem,
             "ucp_device_remote_mem_list_handle_t");
+    if ((status == UCS_OK) &&
+        UCS_STATIC_BITMAP_POPCOUNT(tl_bitmap[UCP_DEVICE_TL_TYPE_LKEY])) {
+        ucp_device_mem_list_keys_init(keys, handle, sizeof(*handle),
+                                      uct_elem_size, 1, num_lanes,
+                                      &tl_bitmap[UCP_DEVICE_TL_TYPE_LKEY]);
+        return UCS_OK;
+    }
 
 out:
     ucs_free(handle);
@@ -795,6 +855,7 @@ ucp_device_remote_mem_list_create(const ucp_device_mem_list_params_t *params,
     ucp_ep_h ep = ucp_device_remote_mem_list_get_first_ep(params);
     ucp_device_mem_elem_release_handles_t release_handles =
             UCS_ARRAY_DYNAMIC_INITIALIZER;
+    ucp_device_mem_list_keys_t keys = {};
     ucs_memory_type_t export_mem_type;
     ucs_sys_device_t sys_dev;
     uct_allocated_memory_t mem;
@@ -818,7 +879,8 @@ ucp_device_remote_mem_list_create(const ucp_device_mem_list_params_t *params,
 
     status = ucp_device_remote_mem_list_create_handle(params, ep,
                                                       export_mem_type, sys_dev,
-                                                      &mem, &release_handles);
+                                                      &mem, &release_handles,
+                                                      &keys);
     if (status != UCS_OK) {
         /*
          * Do not log error for UCS_ERR_NOT_CONNECTED because it is expected
@@ -833,7 +895,7 @@ ucp_device_remote_mem_list_create(const ucp_device_mem_list_params_t *params,
 
     /* Track memory allocator for later release */
     status = ucp_device_mem_handle_hash_insert(&mem, params->num_elements,
-                                               &release_handles);
+                                               &release_handles, &keys);
     if (status != UCS_OK) {
         uct_mem_free(&mem);
         goto err;
@@ -844,6 +906,7 @@ ucp_device_remote_mem_list_create(const ucp_device_mem_list_params_t *params,
 
 err:
     ucp_device_mem_elem_release_handles_cleanup(&release_handles);
+    ucs_free(keys.handle);
     return status;
 }
 
@@ -871,6 +934,7 @@ void ucp_device_mem_list_release(void *mem_list_h)
 
     info = ucp_device_mem_handle_hash_remove(mem_list_h);
     ucp_device_mem_elem_release_handles_cleanup(&info.release_handles);
+    ucs_free(info.keys.handle);
     uct_mem_free(&info.mem);
 }
 
