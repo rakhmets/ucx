@@ -257,6 +257,11 @@ ucp_perf_cuda_send_async(const ucp_perf_cuda_params &params,
                                      params.remote_mem_list, 0, 0,
                                      params.length + ONESIDED_SIGNAL_SIZE,
                                      channel_id, flags, req);
+    case UCX_PERF_CMD_ADD:
+        /* Add to the receive counter, which follows the message */
+        return ucp_device_counter_inc<level>(1, params.remote_mem_list, 0,
+                                             params.length, channel_id, flags,
+                                             req);
     default:
         return UCS_ERR_UNSUPPORTED;
     }
@@ -417,8 +422,21 @@ ucp_perf_cuda_wait_bw_kernel(ucx_perf_cuda_context &ctx,
                              ucp_perf_cuda_params params)
 {
     volatile uint64_t *sn = params.counter_recv;
-    while (*sn < ctx.max_iters) {
+    while (*sn < ctx.expected_sn) {
         __nanosleep(100000); // 100us
+    }
+
+    /* An operation sent twice would add again, wait for it a bit */
+    for (int i = 0; i < 10000; ++i) {
+        __nanosleep(100000);
+    }
+
+    if (*sn != ctx.expected_sn) {
+        ucs_device_error("receive counter %llu, expected %llu",
+                         (unsigned long long)*sn,
+                         (unsigned long long)ctx.expected_sn);
+        ctx.status = UCS_ERR_IO_ERROR;
+        return;
     }
 
     ctx.status = UCS_OK;
