@@ -59,6 +59,13 @@ typedef struct uct_rc_gdaki_iface {
     struct mlx5dv_devx_event_channel *err_event_channel;
     /* Endpoints which can receive error events, protected by the async lock */
     ucs_list_link_t            ep_list;
+    /* Failover accesses device memory while kernels run, so it uses a
+     * non-blocking stream and a pinned buffer, created before kernels run */
+    struct {
+        CUstream stream;
+        void     *buf;
+        size_t   buf_size;
+    } failover;
 } uct_rc_gdaki_iface_t;
 
 
@@ -71,6 +78,8 @@ typedef struct uct_rc_gdaki_ep {
     uint8_t                          failover;
     /* Log2 of the path MTU in bytes, set when connected */
     uint8_t                          log_path_mtu;
+    /* Paused by uct_ep_failover_pause(), until failed */
+    uint8_t                          paused;
     uct_rc_gdaki_channel_block_mem_t mem;
     uct_rc_gdaki_channel_block_t     *channel_block;
     ucs_list_link_t                  list;

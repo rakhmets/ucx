@@ -978,6 +978,129 @@ err_release_ctx:
 /* mlx5 QP state of a QP in error */
 #define UCT_RC_GDAKI_QP_STATE_ERR 6
 
+/* Size of the failover buffer, for small copies */
+#define UCT_RC_GDAKI_FAILOVER_BUF_EXTRA 4096
+
+static ucs_status_t uct_rc_gdaki_iface_failover_init(uct_rc_gdaki_iface_t *iface)
+{
+    size_t buf_size = UCT_RC_GDAKI_FAILOVER_BUF_EXTRA;
+    ucs_status_t status;
+    CUstream stream;
+    void *buf;
+
+    if (iface->failover.stream != NULL) {
+        return UCS_OK;
+    }
+
+    status = UCT_CUDADRV_FUNC_LOG_ERR(cuCtxPushCurrent(iface->cuda.ctx));
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    status = UCT_CUDADRV_FUNC_LOG_ERR(
+            cuStreamCreate(&stream, CU_STREAM_NON_BLOCKING));
+    if (status != UCS_OK) {
+        goto out_pop;
+    }
+
+    status = UCT_CUDADRV_FUNC_LOG_ERR(cuMemHostAlloc(&buf, buf_size, 0));
+    if (status != UCS_OK) {
+        (void)UCT_CUDADRV_FUNC_LOG_WARN(cuStreamDestroy(stream));
+        goto out_pop;
+    }
+
+    iface->failover.stream   = stream;
+    iface->failover.buf      = buf;
+    iface->failover.buf_size = buf_size;
+
+out_pop:
+    (void)UCT_CUDADRV_FUNC_LOG_WARN(cuCtxPopCurrent(NULL));
+    return status;
+}
+
+static void uct_rc_gdaki_iface_failover_cleanup(uct_rc_gdaki_iface_t *iface)
+{
+    if (iface->failover.stream == NULL) {
+        return;
+    }
+
+    if (UCT_CUDADRV_FUNC_LOG_WARN(cuCtxPushCurrent(iface->cuda.ctx)) !=
+        UCS_OK) {
+        return;
+    }
+
+    (void)UCT_CUDADRV_FUNC_LOG_WARN(cuMemFreeHost(iface->failover.buf));
+    (void)UCT_CUDADRV_FUNC_LOG_WARN(cuStreamDestroy(iface->failover.stream));
+    (void)UCT_CUDADRV_FUNC_LOG_WARN(cuCtxPopCurrent(NULL));
+    iface->failover.stream = NULL;
+}
+
+/*
+ * Copy between the failover buffer and device memory. Only an asynchronous
+ * copy on a non-blocking stream is used, since anything else waits for the
+ * running kernels, which wait for the failover.
+ */
+static ucs_status_t
+uct_rc_gdaki_failover_copy(uct_rc_gdaki_iface_t *iface, int to_device,
+                           CUdeviceptr dev_addr, void *host_addr,
+                           size_t length)
+{
+    ucs_status_t status;
+
+    status = UCT_CUDADRV_FUNC_LOG_ERR(cuCtxPushCurrent(iface->cuda.ctx));
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    if (to_device) {
+        status = UCT_CUDADRV_FUNC_LOG_ERR(
+                cuMemcpyHtoDAsync(dev_addr, host_addr, length,
+                                  iface->failover.stream));
+    } else {
+        status = UCT_CUDADRV_FUNC_LOG_ERR(
+                cuMemcpyDtoHAsync(host_addr, dev_addr, length,
+                                  iface->failover.stream));
+    }
+
+    if (status == UCS_OK) {
+        status = UCT_CUDADRV_FUNC_LOG_ERR(
+                cuStreamSynchronize(iface->failover.stream));
+    }
+
+    (void)UCT_CUDADRV_FUNC_LOG_WARN(cuCtxPopCurrent(NULL));
+    return status;
+}
+
+/* Room for small copies in the failover buffer */
+static void *uct_rc_gdaki_failover_scratch(uct_rc_gdaki_iface_t *iface)
+{
+    return UCS_PTR_BYTE_OFFSET(iface->failover.buf,
+                               iface->failover.buf_size -
+                               UCT_RC_GDAKI_FAILOVER_BUF_EXTRA);
+}
+
+static CUdeviceptr uct_rc_gdaki_ep_dev_qp_addr(uct_rc_gdaki_ep_t *ep,
+                                               unsigned ch)
+{
+    return (CUdeviceptr)(ep->channel_block->gpu_ptr + UCT_GDAKI_DEV_EP_SIZE +
+                         (ch * UCT_GDAKI_DEV_QP_SIZE));
+}
+
+static ucs_status_t
+uct_rc_gdaki_failover_read_dev_qp(uct_rc_gdaki_iface_t *iface,
+                                  uct_rc_gdaki_ep_t *ep, unsigned ch,
+                                  uct_rc_gdaki_dev_qp_t **dev_qp_p)
+{
+    void *buf = uct_rc_gdaki_failover_scratch(iface);
+    ucs_status_t status;
+
+    status = uct_rc_gdaki_failover_copy(iface, 0,
+                                        uct_rc_gdaki_ep_dev_qp_addr(ep, ch),
+                                        buf, sizeof(uct_rc_gdaki_dev_qp_t));
+    *dev_qp_p = buf;
+    return status;
+}
+
 /*
  * Query the context of the QP of a channel to out, which is query_qp_out, with
  * the context extension when the device reports the error syndrome there
@@ -1095,6 +1218,19 @@ uct_rc_gdaki_ep_err_status(uct_rc_gdaki_iface_t *iface, uct_rc_gdaki_ep_t *ep)
     return UCS_ERR_IO_ERROR;
 }
 
+static ucs_status_t
+uct_rc_gdaki_failover_write_dev_ep(uct_rc_gdaki_iface_t *iface,
+                                   uct_rc_gdaki_ep_t *ep, size_t offset,
+                                   uint8_t value)
+{
+    uint8_t *buf = uct_rc_gdaki_failover_scratch(iface);
+
+    buf[0] = value;
+    return uct_rc_gdaki_failover_copy(
+            iface, 1, (CUdeviceptr)(ep->channel_block->gpu_ptr + offset), buf,
+            1);
+}
+
 /* Report a device QP error from the progress context, as other transports
  * report errors read from their own CQs */
 static unsigned uct_rc_gdaki_ep_err_progress(void *arg)
@@ -1107,6 +1243,13 @@ static unsigned uct_rc_gdaki_ep_err_progress(void *arg)
     status = uct_rc_gdaki_ep_err_status(iface, ep);
     ucs_debug("ep %p: device channel QP failed: %s", ep,
               ucs_status_string(status));
+
+    /* Failover handles only transport errors, the device reports others */
+    if (ep->failover && ep->dev_ep_init &&
+        (status != UCS_ERR_ENDPOINT_TIMEOUT)) {
+        (void)uct_rc_gdaki_failover_write_dev_ep(
+                iface, ep, ucs_offsetof(uct_rc_gdaki_dev_ep_t, error), 1);
+    }
 
     uct_iface_handle_ep_err(ep->super.super.iface, &ep->super.super, status);
     return 1;
@@ -1164,6 +1307,146 @@ static void uct_rc_gdaki_iface_err_event_handler(int fd,
     }
 }
 
+static ucs_status_t
+uct_rc_gdaki_failover_write_paused(uct_rc_gdaki_iface_t *iface,
+                                   uct_rc_gdaki_ep_t *ep, uint8_t paused)
+{
+    return uct_rc_gdaki_failover_write_dev_ep(
+            iface, ep, ucs_offsetof(uct_rc_gdaki_dev_ep_t, paused), paused);
+}
+
+/* Move the QPs of all channels to the error state, unless they are there */
+static ucs_status_t
+uct_rc_gdaki_ep_stop_qps(uct_rc_gdaki_iface_t *iface, uct_rc_gdaki_ep_t *ep)
+{
+    uct_rc_gdaki_channel_t *channel;
+    uint32_t next_rcv_psn;
+    ucs_status_t status;
+    unsigned ch, state;
+
+    for (ch = 0; ch < iface->num_channels; ++ch) {
+        channel = &ep->channel_block->channels[ch];
+        status  = uct_rc_gdaki_channel_query_state(iface, channel, &state,
+                                                   &next_rcv_psn);
+        if (status != UCS_OK) {
+            return status;
+        }
+
+        if (state != UCT_RC_GDAKI_QP_STATE_ERR) {
+            status = uct_ib_mlx5_modify_qp_state(&iface->super.super.super,
+                                                 &channel->qp.super,
+                                                 IBV_QPS_ERR);
+            if (status != UCS_OK) {
+                return status;
+            }
+        }
+    }
+
+    return UCS_OK;
+}
+
+static ucs_status_t
+uct_rc_gdaki_ep_failover_pause(uct_ep_h tl_ep, void *rx_token,
+                               size_t *rx_token_length_p)
+{
+    uct_rc_gdaki_ep_t *ep       = ucs_derived_of(tl_ep, uct_rc_gdaki_ep_t);
+    uct_rc_gdaki_iface_t *iface = ucs_derived_of(tl_ep->iface,
+                                                 uct_rc_gdaki_iface_t);
+    size_t length               = iface->num_channels * sizeof(uint32_t);
+    uct_rc_gdaki_dev_qp_t *dev_qp;
+    uint32_t next_rcv_psn;
+    ucs_status_t status;
+    unsigned ch, state;
+
+    if (!ep->failover || (*rx_token_length_p < length)) {
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    /* New device operations wait from now on */
+    if (!ep->paused) {
+        if (ep->dev_ep_init) {
+            status = uct_rc_gdaki_failover_write_paused(iface, ep, 1);
+            if (status != UCS_OK) {
+                return status;
+            }
+        }
+
+        ep->paused = 1;
+    }
+
+    /* A QP in error does not send or receive, so its receive PSN is final */
+    status = uct_rc_gdaki_ep_stop_qps(iface, ep);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    /* The device must finish the WQEs it reserved, so the work queues are
+     * final */
+    if (ep->dev_ep_init) {
+        for (ch = 0; ch < iface->num_channels; ++ch) {
+            status = uct_rc_gdaki_failover_read_dev_qp(iface, ep, ch, &dev_qp);
+            if (status != UCS_OK) {
+                return status;
+            }
+
+            if (dev_qp->sq_rsvd_index != dev_qp->sq_ready_index) {
+                return UCS_ERR_NO_RESOURCE;
+            }
+        }
+    }
+
+    for (ch = 0; ch < iface->num_channels; ++ch) {
+        status = uct_rc_gdaki_channel_query_state(
+                iface, &ep->channel_block->channels[ch], &state,
+                &next_rcv_psn);
+        if (status != UCS_OK) {
+            return status;
+        }
+
+        ((uint32_t*)rx_token)[ch] = htobe32(next_rcv_psn);
+    }
+
+    *rx_token_length_p = length;
+    return UCS_OK;
+}
+
+static ucs_status_t uct_rc_gdaki_ep_failover_fail(uct_ep_h tl_ep)
+{
+    uct_rc_gdaki_ep_t *ep       = ucs_derived_of(tl_ep, uct_rc_gdaki_ep_t);
+    uct_rc_gdaki_iface_t *iface = ucs_derived_of(tl_ep->iface,
+                                                 uct_rc_gdaki_iface_t);
+    ucs_status_t status;
+
+    if (!ep->failover) {
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    /* Operations on the channels that did not fail fail as well */
+    status = uct_rc_gdaki_ep_stop_qps(iface, ep);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    if (ep->dev_ep_init) {
+        status = uct_rc_gdaki_failover_write_dev_ep(
+                iface, ep, ucs_offsetof(uct_rc_gdaki_dev_ep_t, error), 1);
+        if (status != UCS_OK) {
+            return status;
+        }
+
+        if (ep->paused) {
+            status = uct_rc_gdaki_failover_write_paused(iface, ep, 0);
+            if (status != UCS_OK) {
+                return status;
+            }
+        }
+    }
+
+    ucs_debug("ep %p: failed, device operations fail", ep);
+    ep->paused = 0;
+    return UCS_OK;
+}
+
 static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
 {
     uct_rc_gdaki_iface_t *iface = ucs_derived_of(params->iface,
@@ -1182,7 +1465,15 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
     self->failover        = (params->field_mask & UCT_EP_PARAM_FIELD_FLAGS) &&
                             (params->flags & UCT_EP_PARAM_FLAG_FAILOVER);
     self->log_path_mtu    = ucs_ilog2(uct_ib_mtu_value(IBV_MTU_4096));
+    self->paused          = 0;
     uct_rc_gdaki_ep_reset_channels(self);
+
+    if (self->failover) {
+        status = uct_rc_gdaki_iface_failover_init(iface);
+        if (status != UCS_OK) {
+            return status;
+        }
+    }
 
     status = uct_rc_gdaki_ep_init_channels(iface, self);
     if (status != UCS_OK) {
@@ -1481,7 +1772,9 @@ static uct_rc_iface_ops_t uct_rc_gdaki_internal_ops = {
             .iface_is_reachable_v2  = uct_ib_iface_is_reachable_v2,
             .ep_is_connected        = uct_rc_gdaki_ep_is_connected,
             .ep_get_device_ep       = uct_rc_gdaki_ep_get_device_ep,
-            .ep_outstanding_purge   = (uct_ep_outstanding_purge_func_t)ucs_empty_function_return_unsupported
+            .ep_outstanding_purge   = (uct_ep_outstanding_purge_func_t)ucs_empty_function_return_unsupported,
+            .ep_failover_pause      = uct_rc_gdaki_ep_failover_pause,
+            .ep_failover_fail       = uct_rc_gdaki_ep_failover_fail
         },
         .create_cq  = uct_rc_gdaki_create_cq,
         .destroy_cq = (uct_ib_iface_destroy_cq_func_t)ucs_empty_function_return_success,
@@ -1684,6 +1977,9 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_iface_t, uct_md_h tl_md,
     self->cuda.dev               = cuda_dev;
     self->cuda.ctx               = NULL;
     self->cuda.alloc_granularity = SIZE_MAX;
+    self->failover.stream        = NULL;
+    self->failover.buf           = NULL;
+    self->failover.buf_size      = 0;
 
     return UCS_OK;
 
@@ -1717,6 +2013,7 @@ static UCS_CLASS_CLEANUP_FUNC(uct_rc_gdaki_iface_t)
         self->uar_wrap = NULL;
     }
 
+    uct_rc_gdaki_iface_failover_cleanup(self);
 
     if (self->cuda.ctx != NULL) {
         (void)UCT_CUDADRV_FUNC_LOG_WARN(
