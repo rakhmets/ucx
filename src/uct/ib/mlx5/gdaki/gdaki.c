@@ -1179,6 +1179,9 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
 
     self->dev_ep_init     = 0;
     self->error_scheduled = 0;
+    self->failover        = (params->field_mask & UCT_EP_PARAM_FIELD_FLAGS) &&
+                            (params->flags & UCT_EP_PARAM_FLAG_FAILOVER);
+    self->log_path_mtu    = ucs_ilog2(uct_ib_mtu_value(IBV_MTU_4096));
     uct_rc_gdaki_ep_reset_channels(self);
 
     status = uct_rc_gdaki_ep_init_channels(iface, self);
@@ -1268,6 +1271,7 @@ uct_rc_gdaki_ep_connect_to_ep_v2(uct_ep_h tl_ep,
     }
 
     ucs_assert(path_mtu != UCT_IB_ADDRESS_INVALID_PATH_MTU);
+    ep->log_path_mtu = ucs_ilog2(uct_ib_mtu_value(path_mtu));
 
     for (i = 0; i < iface->num_channels; i++) {
         dest_qp_num = uct_ib_unpack_uint24(
@@ -1415,6 +1419,8 @@ uct_rc_gdaki_ep_get_device_ep(uct_ep_h tl_ep, uct_device_ep_h *device_ep_p)
                 iface->super.super.config.tx_qp_len);
         dev_ep->sq_fc_mask   = (dev_ep->sq_wqe_num >> 1) - 1;
         dev_ep->channel_mask = iface->num_channels - 1;
+        dev_ep->failover     = ep->failover;
+        dev_ep->log_path_mtu = ep->log_path_mtu;
         dev_ep->sq_wqe_daddr = (uint8_t*)(ep->channel_block->gpu_ptr +
                                           UCT_GDAKI_DEV_EP_SIZE +
                                           iface->num_channels *

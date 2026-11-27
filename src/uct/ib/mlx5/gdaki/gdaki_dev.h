@@ -21,7 +21,10 @@ typedef struct {
 
     uint64_t                     *sq_db;
     uint32_t                     qpn_ds;
-    uint8_t                      pad[12];
+    /* With failover, number of packets of the ready WQEs, which is the PSN
+     * that follows the last ready WQE */
+    uint32_t                     sq_ready_psn;
+    uint8_t                      pad[8];
 } uct_rc_gdaki_dev_qp_t;
 
 
@@ -34,8 +37,11 @@ typedef struct {
     uint16_t                     sq_wqe_num;
     uint16_t                     sq_fc_mask;
     uint8_t                      channel_mask;
+    /* The host fails over failed QPs, see UCT_EP_PARAM_FLAG_FAILOVER */
+    uint8_t                      failover;
+    uint8_t                      log_path_mtu;
 
-    uint8_t                      pad[31];
+    uint8_t                      pad[29];
 
     uct_rc_gdaki_dev_qp_t        qps[0];
 } uct_rc_gdaki_dev_ep_t;

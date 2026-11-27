@@ -67,6 +67,10 @@ typedef struct uct_rc_gdaki_ep {
     uint8_t                          dev_ep_init;
     /* An error event was received, and reporting it was scheduled */
     uint8_t                          error_scheduled;
+    /* Created with UCT_EP_PARAM_FLAG_FAILOVER */
+    uint8_t                          failover;
+    /* Log2 of the path MTU in bytes, set when connected */
+    uint8_t                          log_path_mtu;
     uct_rc_gdaki_channel_block_mem_t mem;
     uct_rc_gdaki_channel_block_t     *channel_block;
     ucs_list_link_t                  list;

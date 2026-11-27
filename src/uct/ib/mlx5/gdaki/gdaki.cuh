@@ -220,7 +220,7 @@ UCS_F_DEVICE void uct_rc_mlx5_gda_wqe_prepare_nop(
 
 UCS_F_DEVICE void uct_rc_mlx5_gda_db(uct_rc_gdaki_dev_ep_t *ep, unsigned cid,
                                      uint64_t wqe_base, unsigned count,
-                                     uint64_t flags)
+                                     unsigned num_packets, uint64_t flags)
 {
     auto qp = uct_rc_mlx5_gda_get_qp(ep, cid);
     cuda::atomic_ref<uint64_t, cuda::thread_scope_device> ref(
@@ -228,6 +228,12 @@ UCS_F_DEVICE void uct_rc_mlx5_gda_db(uct_rc_gdaki_dev_ep_t *ep, unsigned cid,
     const uint64_t wqe_next = wqe_base + count;
     const bool skip_db      = !(flags & UCT_DEVICE_FLAG_NODELAY) &&
                               !((wqe_base ^ wqe_next) & 128);
+
+    /* Counted before the WQEs become ready, so the counter is final once
+     * every reserved WQE is ready */
+    if (uct_rc_mlx5_load_const(&ep->failover)) {
+        atomicAdd(&qp->sq_ready_psn, num_packets);
+    }
 
     if (skip_db) {
         doca_gpu_dev_verbs_fence_release<DOCA_GPUNETIO_VERBS_SYNC_SCOPE_GPU>();
@@ -255,6 +261,20 @@ UCS_F_DEVICE bool
 uct_rc_mlx5_gda_fc(const uct_rc_gdaki_dev_ep_t *ep, uint16_t wqe_idx)
 {
     return !(wqe_idx & ep->sq_fc_mask);
+}
+
+/* Number of packets the WQE is sent in */
+UCS_F_DEVICE unsigned
+uct_rc_mlx5_gda_num_packets(uct_rc_gdaki_dev_ep_t *ep, size_t length,
+                            bool is_atomic)
+{
+    const unsigned log_mtu = uct_rc_mlx5_load_const(&ep->log_path_mtu);
+
+    if (is_atomic || (length == 0)) {
+        return 1;
+    }
+
+    return (length + (UCS_BIT(log_mtu) - 1)) >> log_mtu;
 }
 
 template<ucs_device_level_t level>
@@ -297,7 +317,9 @@ UCS_F_DEVICE ucs_status_t uct_rc_mlx5_gda_ep_single(
     uct_dev_sync<level>();
 
     if (lane_id == 0) {
-        uct_rc_mlx5_gda_db(ep, cid, wqe_base, 1, flags);
+        uct_rc_mlx5_gda_db(ep, cid, wqe_base, 1,
+                           uct_rc_mlx5_gda_num_packets(ep, length, is_atomic),
+                           flags);
     }
 
     uct_dev_sync<level>();
@@ -434,7 +456,8 @@ UCS_F_DEVICE ucs_status_t uct_rc_mlx5_gda_ep_flush(uct_device_ep_h tl_ep,
     uct_dev_sync<level>();
 
     if (lane_id == 0) {
-        uct_rc_mlx5_gda_db(ep, cid, wqe_base, 1,
+        /* A NOP is not sent, so it takes no PSN */
+        uct_rc_mlx5_gda_db(ep, cid, wqe_base, 1, 0,
                            flags | UCT_DEVICE_FLAG_NODELAY);
 
         do {
