@@ -87,13 +87,19 @@ UCS_F_DEVICE void ucp_device_request_init(uct_device_ep_t *device_ep,
 
 
 /**
- * Macro for device put operations with retry logic
+ * Macro for device send operations with retry logic. The operation is
+ * prepared again before every attempt, since failover may move it to another
+ * lane meanwhile.
  */
-#define UCP_DEVICE_SEND_BLOCKING(_level, _uct_device_ep_send, _device_ep, \
-                                 _req, ...) \
+#define UCP_DEVICE_SEND_BLOCKING(_level, _prepare, _uct_device_ep_send, \
+                                 _device_ep, _req, ...) \
     ({ \
         ucs_status_t _status; \
         do { \
+            _status = (_prepare); \
+            if (_status != UCS_OK) { \
+                return _status; \
+            } \
             _status = _uct_device_ep_send<_level>(_device_ep, __VA_ARGS__); \
             if (_status != UCS_ERR_NO_RESOURCE) { \
                 break; \
@@ -120,11 +126,49 @@ UCS_F_DEVICE void ucp_device_request_init(uct_device_ep_t *device_ep,
                     _index))
 
 
+/* Whether failover moved the operations of a device endpoint elsewhere */
+UCS_F_DEVICE bool ucp_device_ep_failed(const uct_device_ep_t *device_ep)
+{
+    return (device_ep != nullptr) &&
+           (*reinterpret_cast<const volatile uint8_t*>(&device_ep->flags) &
+            UCT_DEVICE_EP_FLAG_FAILED);
+}
+
+
+/*
+ * The lane of a memory list element to use for a channel: the lane of the
+ * channel, or if its device endpoint failed, the next lane which did not
+ * fail. The host moves the operations of a failed lane to that same lane,
+ * so the operations of a channel stay ordered.
+ */
+UCS_F_DEVICE unsigned
+ucp_device_select_lane(const uct_device_remote_tl_elem_t *tl,
+                       unsigned num_lanes, unsigned channel_id)
+{
+    unsigned lane = channel_id % num_lanes;
+    unsigned i, next;
+
+    if (ucs_likely(!ucp_device_ep_failed(tl[lane].ep))) {
+        return lane;
+    }
+
+    for (i = 1; i < num_lanes; ++i) {
+        next = (lane + i) % num_lanes;
+        if ((tl[next].ep != nullptr) && !ucp_device_ep_failed(tl[next].ep)) {
+            return next;
+        }
+    }
+
+    return lane;
+}
+
+
 UCS_F_DEVICE ucs_status_t ucp_device_prepare_send_remote(
         const ucp_device_remote_mem_list_h dst_mem_list_h,
-        unsigned dst_mem_list_index, uint64_t &remote_address, unsigned lane,
-        ucp_device_request_t *req, uct_device_ep_t *&device_ep,
-        const uct_device_mem_elem_t *&uct_elem, uct_device_completion_t *&comp)
+        unsigned dst_mem_list_index, uint64_t &remote_address,
+        unsigned channel_id, unsigned &lane, ucp_device_request_t *req,
+        uct_device_ep_t *&device_ep, const uct_device_mem_elem_t *&uct_elem,
+        uct_device_completion_t *&comp)
 {
     ucs_status_t status;
 
@@ -135,7 +179,10 @@ UCS_F_DEVICE ucs_status_t ucp_device_prepare_send_remote(
 
     const auto dst_mem_element = UCP_DEVICE_GET_ELEM(dst_mem_list_h,
                                                      dst_mem_list_index);
-    remote_address             = dst_mem_element->addr;
+    lane           = ucp_device_select_lane(dst_mem_element->tl,
+                                            dst_mem_list_h->num_lanes,
+                                            channel_id);
+    remote_address = dst_mem_element->addr;
     device_ep                  = dst_mem_element->tl[lane].ep;
     uct_elem                   = &dst_mem_element->tl[lane].uct;
     ucp_device_request_init(device_ep, req, comp);
@@ -149,8 +196,9 @@ UCS_F_DEVICE ucs_status_t ucp_device_prepare_send(
         unsigned src_mem_list_index,
         const ucp_device_remote_mem_list_h dst_mem_list_h,
         unsigned dst_mem_list_index, const void *&address,
-        uint64_t &remote_address, unsigned lane, ucp_device_request_t *req,
-        uct_device_ep_t *&device_ep, const uct_device_mem_elem_t *&src_uct_elem,
+        uint64_t &remote_address, unsigned channel_id, unsigned &lane,
+        ucp_device_request_t *req, uct_device_ep_t *&device_ep,
+        const uct_device_mem_elem_t *&src_uct_elem,
         const uct_device_mem_elem_t *&uct_elem, uct_device_completion_t *&comp)
 {
     ucs_status_t status;
@@ -161,8 +209,8 @@ UCS_F_DEVICE ucs_status_t ucp_device_prepare_send(
     }
 
     status = ucp_device_prepare_send_remote(dst_mem_list_h, dst_mem_list_index,
-                                            remote_address, lane, req,
-                                            device_ep, uct_elem, comp);
+                                            remote_address, channel_id, lane,
+                                            req, device_ep, uct_elem, comp);
     if (status != UCS_OK) {
         return status;
     }
@@ -229,19 +277,17 @@ ucp_device_put(const ucp_device_local_mem_list_h src_mem_list_h,
     uint64_t remote_address;
     uct_device_completion_t *comp;
     uct_device_ep_t *device_ep;
-    ucs_status_t status;
 
     UCP_DEVICE_GET_LANE(dst_mem_list_h, channel_id, lane, uct_channel_id);
 
-    status = ucp_device_prepare_send(src_mem_list_h, src_mem_list_index,
-                                     dst_mem_list_h, dst_mem_list_index,
-                                     address, remote_address, lane, req,
-                                     device_ep, src_uct_elem, uct_elem, comp);
-    if (status != UCS_OK) {
-        return status;
-    }
-
-    return UCP_DEVICE_SEND_BLOCKING(level, uct_device_ep_put, device_ep, req,
+    return UCP_DEVICE_SEND_BLOCKING(level,
+                                    ucp_device_prepare_send(
+                                            src_mem_list_h, src_mem_list_index,
+                                            dst_mem_list_h, dst_mem_list_index,
+                                            address, remote_address,
+                                            channel_id, lane, req, device_ep,
+                                            src_uct_elem, uct_elem, comp),
+                                    uct_device_ep_put, device_ep, req,
                                     src_uct_elem, uct_elem,
                                     UCS_PTR_BYTE_OFFSET(address, src_offset),
                                     remote_address + dst_offset, length,
@@ -293,18 +339,15 @@ UCS_F_DEVICE ucs_status_t ucp_device_counter_inc(
     const uct_device_mem_elem_t *uct_elem;
     uct_device_completion_t *comp;
     uct_device_ep_t *device_ep;
-    ucs_status_t status;
 
     UCP_DEVICE_GET_LANE(mem_list_h, channel_id, lane, uct_channel_id);
 
-    status = ucp_device_prepare_send_remote(mem_list_h, mem_list_index,
-                                            remote_address, lane, req,
-                                            device_ep, uct_elem, comp);
-    if (status != UCS_OK) {
-        return status;
-    }
-
-    return UCP_DEVICE_SEND_BLOCKING(level, uct_device_ep_atomic_add, device_ep,
+    return UCP_DEVICE_SEND_BLOCKING(level,
+                                    ucp_device_prepare_send_remote(
+                                            mem_list_h, mem_list_index,
+                                            remote_address, channel_id, lane,
+                                            req, device_ep, uct_elem, comp),
+                                    uct_device_ep_atomic_add, device_ep,
                                     req, uct_elem, inc_value,
                                     remote_address + offset, uct_channel_id,
                                     flags, comp);
@@ -420,7 +463,8 @@ ucp_device_flush(const ucp_device_remote_mem_list_h mem_list_h,
 
     for (index = 0; index < mem_list_h->length; index++) {
         const auto mem_element    = UCP_DEVICE_GET_ELEM(mem_list_h, index);
-        uct_device_ep_h device_ep = mem_element->tl[lane].ep;
+        uct_device_ep_h device_ep = mem_element->tl[ucp_device_select_lane(
+                mem_element->tl, mem_list_h->num_lanes, channel_id)].ep;
 
         if (device_ep == NULL) {
             continue;
