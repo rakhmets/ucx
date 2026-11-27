@@ -55,14 +55,21 @@ typedef struct uct_rc_gdaki_iface {
         CUcontext ctx;
         size_t    alloc_granularity;
     } cuda;
+    /* Delivers an event when a channel CQ receives an error completion */
+    struct mlx5dv_devx_event_channel *err_event_channel;
+    /* Endpoints which can receive error events, protected by the async lock */
+    ucs_list_link_t            ep_list;
 } uct_rc_gdaki_iface_t;
 
 
 typedef struct uct_rc_gdaki_ep {
     uct_base_ep_t                    super;
     uint8_t                          dev_ep_init;
+    /* An error event was received, and reporting it was scheduled */
+    uint8_t                          error_scheduled;
     uct_rc_gdaki_channel_block_mem_t mem;
     uct_rc_gdaki_channel_block_t     *channel_block;
+    ucs_list_link_t                  list;
 } uct_rc_gdaki_ep_t;
 
 ucs_status_t

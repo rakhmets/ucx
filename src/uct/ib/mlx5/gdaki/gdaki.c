@@ -10,6 +10,7 @@
 
 #include "gdaki.h"
 
+#include <ucs/async/async.h>
 #include <ucs/sys/netlink.h>
 #include <ucs/sys/sock.h>
 #include <ucs/sys/sys.h>
@@ -27,6 +28,7 @@
 #include <uct/cuda/base/cuda_nvml.h>
 #include <uct/cuda/cuda_copy/cuda_copy_md.h>
 
+#include <fcntl.h>
 #include <limits.h>
 #include <linux/rtnetlink.h>
 #include <string.h>
@@ -554,6 +556,52 @@ uct_rc_gdaki_chunk_channels_destroy(uct_rc_gdaki_iface_t *iface,
     }
 }
 
+/*
+ * The device owns the channel CQs and polls them, so the host learns about a
+ * failed QP from a CQ event. Each channel CQ is subscribed to the iface error
+ * event channel with its CQ number as the cookie.
+ */
+static ucs_status_t
+uct_rc_gdaki_iface_subscribe_cq(uct_rc_gdaki_iface_t *iface,
+                                uct_ib_mlx5_cq_t *cq)
+{
+    uint16_t event_num = 0; /* Completion event */
+    int ret;
+
+    if (iface->err_event_channel == NULL) {
+        return UCS_OK;
+    }
+
+    ret = mlx5dv_devx_subscribe_devx_event(iface->err_event_channel,
+                                           cq->devx.obj, sizeof(event_num),
+                                           &event_num, cq->cq_num);
+    if (ret != 0) {
+        ucs_error("mlx5dv_devx_subscribe_devx_event(CQ 0x%x) failed: %m",
+                  cq->cq_num);
+        return UCS_ERR_IO_ERROR;
+    }
+
+    return UCS_OK;
+}
+
+/*
+ * Arm a channel CQ to raise an event for solicited completions only. Device
+ * operations are never solicited, so only an error completion raises the
+ * event. The doorbell record lives in device memory and is not needed for
+ * arming, only the doorbell is written.
+ */
+static void uct_rc_gdaki_cq_arm_solicited(uct_ib_mlx5_cq_t *cq)
+{
+    uint32_t sn_ci_cmd = ((cq->cq_sn & 3) << 28) | MLX5_CQ_DB_REQ_NOT_SOL;
+    uint64_t doorbell  = ((uint64_t)sn_ci_cmd << 32) | cq->cq_num;
+
+    ucs_memory_cpu_store_fence();
+    *(volatile uint64_t*)UCS_PTR_BYTE_OFFSET(cq->uar, MLX5_CQ_DOORBELL) =
+            htobe64(doorbell);
+    ucs_memory_bus_store_fence();
+    ++cq->cq_sn;
+}
+
 static ucs_status_t
 uct_rc_gdaki_init_channel_chunk(uct_rc_gdaki_iface_t *iface,
                                 uct_rc_gdaki_channel_block_mem_t *mem,
@@ -612,6 +660,12 @@ uct_rc_gdaki_init_channel_chunk(uct_rc_gdaki_iface_t *iface,
                                                        UCT_IB_DIR_TX, &cq_attr,
                                                        &channel->cq, 0, 0);
             if (status != UCS_OK) {
+                goto err_cleanup;
+            }
+
+            status = uct_rc_gdaki_iface_subscribe_cq(iface, &channel->cq);
+            if (status != UCS_OK) {
+                uct_ib_mlx5_devx_destroy_cq_common(&channel->cq);
                 goto err_cleanup;
             }
 
@@ -921,6 +975,195 @@ err_release_ctx:
     return status;
 }
 
+/* mlx5 QP state of a QP in error */
+#define UCT_RC_GDAKI_QP_STATE_ERR 6
+
+/*
+ * Query the context of the QP of a channel to out, which is query_qp_out, with
+ * the context extension when the device reports the error syndrome there
+ */
+static ucs_status_t
+uct_rc_gdaki_channel_query(uct_rc_gdaki_iface_t *iface,
+                           uct_rc_gdaki_channel_t *channel, void *out)
+{
+    uct_ib_mlx5_md_t *md = uct_ib_mlx5_iface_md(&iface->super.super.super);
+    char in[UCT_IB_MLX5DV_ST_SZ_BYTES(query_qp_in)] = {};
+
+    if (md->flags & UCT_IB_MLX5_MD_FLAG_QP_ERROR_SYNDROME) {
+        UCT_IB_MLX5DV_SET(query_qp_in, in, qpc_ext, 1);
+    }
+
+    return uct_ib_mlx5_devx_query_qp(&channel->qp.super, in, sizeof(in), out,
+                                     UCT_IB_MLX5DV_ST_SZ_BYTES(query_qp_out));
+}
+
+static ucs_status_t
+uct_rc_gdaki_channel_query_state(uct_rc_gdaki_iface_t *iface,
+                                 uct_rc_gdaki_channel_t *channel,
+                                 unsigned *state_p, uint32_t *next_rcv_psn_p)
+{
+    char out[UCT_IB_MLX5DV_ST_SZ_BYTES(query_qp_out)] = {};
+    ucs_status_t status;
+
+    status = uct_rc_gdaki_channel_query(iface, channel, out);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    *state_p        = UCT_IB_MLX5DV_GET(query_qp_out, out, qpc.state);
+    *next_rcv_psn_p = UCT_IB_MLX5DV_GET(query_qp_out, out, qpc.next_rcv_psn);
+    return UCS_OK;
+}
+
+/*
+ * Status of the error of a channel whose QP failed by itself. The errors after
+ * which the peer may not have received the operations, when the transport or
+ * RNR retries ran out or the QP was flushed, are reported as
+ * UCS_ERR_ENDPOINT_TIMEOUT. The error completion shows the cause only until
+ * the flush completions of the WQEs that follow replace it in the collapsed
+ * CQ, so the cause is read from the QP context extension.
+ */
+static ucs_status_t
+uct_rc_gdaki_channel_err_status(uct_rc_gdaki_iface_t *iface,
+                                uct_rc_gdaki_ep_t *ep, unsigned ch)
+{
+    uct_ib_mlx5_md_t *md = uct_ib_mlx5_iface_md(&iface->super.super.super);
+    uct_rc_gdaki_channel_t *channel = &ep->channel_block->channels[ch];
+    char out[UCT_IB_MLX5DV_ST_SZ_BYTES(query_qp_out)] = {};
+    uint8_t syndrome;
+    ucs_status_t status;
+
+    if (!(md->flags & UCT_IB_MLX5_MD_FLAG_QP_ERROR_SYNDROME)) {
+        ucs_diag("ep %p: channel %u qp 0x%x failed, the device does not report"
+                 " the error syndrome, assuming a transport error", ep, ch,
+                 channel->qp.super.qp_num);
+        return UCS_ERR_ENDPOINT_TIMEOUT;
+    }
+
+    status = uct_rc_gdaki_channel_query(iface, channel, out);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    syndrome = UCT_IB_MLX5DV_GET(query_qp_out, out,
+                                 qpc_data_extension.error_syndrome.syndrome);
+    ucs_diag("ep %p: channel %u qp 0x%x failed, syndrome 0x%x vendor syndrome"
+             " 0x%x hw syndrome 0x%x type %u", ep, ch, channel->qp.super.qp_num,
+             syndrome,
+             UCT_IB_MLX5DV_GET(query_qp_out, out,
+                               qpc_data_extension.error_syndrome
+                                       .vendor_error_syndrome),
+             UCT_IB_MLX5DV_GET(query_qp_out, out,
+                               qpc_data_extension.error_syndrome
+                                       .hw_error_syndrome),
+             UCT_IB_MLX5DV_GET(query_qp_out, out,
+                               qpc_data_extension.error_syndrome
+                                       .hw_syndrome_type));
+
+    switch (syndrome) {
+    case MLX5_CQE_SYNDROME_TRANSPORT_RETRY_EXC_ERR:
+    case MLX5_CQE_SYNDROME_RNR_RETRY_EXC_ERR:
+    case MLX5_CQE_SYNDROME_WR_FLUSH_ERR:
+        return UCS_ERR_ENDPOINT_TIMEOUT;
+    default:
+        return UCS_ERR_IO_ERROR;
+    }
+}
+
+/* Status of the error of a failed endpoint, from its first channel whose QP
+ * failed by itself */
+static ucs_status_t
+uct_rc_gdaki_ep_err_status(uct_rc_gdaki_iface_t *iface, uct_rc_gdaki_ep_t *ep)
+{
+    unsigned ch, state;
+    uint32_t next_rcv_psn;
+    ucs_status_t status;
+
+    for (ch = 0; ch < iface->num_channels; ++ch) {
+        status = uct_rc_gdaki_channel_query_state(
+                iface, &ep->channel_block->channels[ch], &state,
+                &next_rcv_psn);
+        if (status != UCS_OK) {
+            return status;
+        }
+
+        if (state == UCT_RC_GDAKI_QP_STATE_ERR) {
+            return uct_rc_gdaki_channel_err_status(iface, ep, ch);
+        }
+    }
+
+    return UCS_ERR_IO_ERROR;
+}
+
+/* Report a device QP error from the progress context, as other transports
+ * report errors read from their own CQs */
+static unsigned uct_rc_gdaki_ep_err_progress(void *arg)
+{
+    uct_rc_gdaki_ep_t *ep       = arg;
+    uct_rc_gdaki_iface_t *iface = ucs_derived_of(ep->super.super.iface,
+                                                 uct_rc_gdaki_iface_t);
+    ucs_status_t status;
+
+    status = uct_rc_gdaki_ep_err_status(iface, ep);
+    ucs_debug("ep %p: device channel QP failed: %s", ep,
+              ucs_status_string(status));
+
+    uct_iface_handle_ep_err(ep->super.super.iface, &ep->super.super, status);
+    return 1;
+}
+
+static uct_rc_gdaki_ep_t *
+uct_rc_gdaki_iface_find_ep_by_cqn(uct_rc_gdaki_iface_t *iface, uint32_t cqn)
+{
+    uct_rc_gdaki_ep_t *ep;
+    unsigned i;
+
+    ucs_list_for_each(ep, &iface->ep_list, list) {
+        for (i = 0; i < iface->num_channels; ++i) {
+            if (ep->channel_block->channels[i].cq.cq_num == cqn) {
+                return ep;
+            }
+        }
+    }
+
+    return NULL;
+}
+
+/* Called with the async lock held, so the endpoint list is stable */
+static void uct_rc_gdaki_iface_err_event_handler(int fd,
+                                                 ucs_event_set_types_t events,
+                                                 void *arg)
+{
+    uct_rc_gdaki_iface_t *iface = arg;
+    uct_priv_worker_t *worker   = iface->super.super.super.super.worker;
+    struct mlx5dv_devx_async_event_hdr event;
+    uct_rc_gdaki_ep_t *ep;
+    ssize_t ret;
+
+    for (;;) {
+        ret = mlx5dv_devx_get_event(iface->err_event_channel, &event,
+                                    sizeof(event));
+        if (ret < 0) {
+            if (errno != EAGAIN) {
+                ucs_warn("%s: mlx5dv_devx_get_event() failed: %m",
+                         uct_ib_device_name(uct_ib_iface_device(
+                                 &iface->super.super.super)));
+            }
+            return;
+        }
+
+        /* The endpoint may be already destroyed, or reported */
+        ep = uct_rc_gdaki_iface_find_ep_by_cqn(iface, (uint32_t)event.cookie);
+        if ((ep == NULL) || ep->error_scheduled) {
+            continue;
+        }
+
+        ep->error_scheduled = 1;
+        ucs_callbackq_add_oneshot(&worker->super.progress_q, ep,
+                                  uct_rc_gdaki_ep_err_progress, ep);
+    }
+}
+
 static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
 {
     uct_rc_gdaki_iface_t *iface = ucs_derived_of(params->iface,
@@ -934,16 +1177,40 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
 
     UCS_CLASS_CALL_SUPER_INIT(uct_base_ep_t, &iface->super.super.super.super);
 
-    self->dev_ep_init = 0;
+    self->dev_ep_init     = 0;
+    self->error_scheduled = 0;
     uct_rc_gdaki_ep_reset_channels(self);
 
-    return uct_rc_gdaki_ep_init_channels(iface, self);
+    status = uct_rc_gdaki_ep_init_channels(iface, self);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    UCS_ASYNC_BLOCK(iface->super.super.super.super.worker->async);
+    ucs_list_add_tail(&iface->ep_list, &self->list);
+    UCS_ASYNC_UNBLOCK(iface->super.super.super.super.worker->async);
+    return UCS_OK;
+}
+
+static int
+uct_rc_gdaki_ep_err_progress_filter(const ucs_callbackq_elem_t *elem,
+                                    void *arg)
+{
+    return (elem->cb == uct_rc_gdaki_ep_err_progress) && (elem->arg == arg);
 }
 
 static UCS_CLASS_CLEANUP_FUNC(uct_rc_gdaki_ep_t)
 {
     uct_rc_gdaki_iface_t *iface = ucs_derived_of(self->super.super.iface,
                                                  uct_rc_gdaki_iface_t);
+    uct_priv_worker_t *worker   = iface->super.super.super.super.worker;
+
+    /* No error event can reach this endpoint anymore */
+    UCS_ASYNC_BLOCK(worker->async);
+    ucs_list_del(&self->list);
+    ucs_callbackq_remove_oneshot(&worker->super.progress_q, self,
+                                 uct_rc_gdaki_ep_err_progress_filter, self);
+    UCS_ASYNC_UNBLOCK(worker->async);
 
     uct_rc_gdaki_ep_cleanup_channels(iface, self);
 }
@@ -1010,6 +1277,12 @@ uct_rc_gdaki_ep_connect_to_ep_v2(uct_ep_h tl_ep,
                 path_mtu, path_index, iface->super.super.config.max_rd_atomic);
         if (status != UCS_OK) {
             return status;
+        }
+    }
+
+    if (iface->err_event_channel != NULL) {
+        for (i = 0; i < iface->num_channels; i++) {
+            uct_rc_gdaki_cq_arm_solicited(&channels[i].cq);
         }
     }
 
@@ -1237,6 +1510,72 @@ static uct_iface_ops_t uct_rc_gdaki_iface_tl_ops = {
             ucs_empty_function_return_unsupported,
 };
 
+static ucs_status_t
+uct_rc_gdaki_iface_init_err_events(uct_rc_gdaki_iface_t *iface)
+{
+    uct_ib_mlx5_md_t *md      = uct_ib_mlx5_iface_md(&iface->super.super.super);
+    uct_priv_worker_t *worker = iface->super.super.super.super.worker;
+    struct mlx5dv_devx_event_channel *channel;
+    ucs_status_t status;
+
+    ucs_list_head_init(&iface->ep_list);
+    iface->err_event_channel = NULL;
+
+    if (worker->async == NULL) {
+        ucs_diag("%s: no async context, device QP errors will not be "
+                 "reported", uct_ib_device_name(&md->super.dev));
+        return UCS_OK;
+    }
+
+    channel = mlx5dv_devx_create_event_channel(
+            md->super.dev.ibv_context,
+            MLX5_IB_UAPI_DEVX_CR_EV_CH_FLAGS_OMIT_DATA);
+    if (channel == NULL) {
+        ucs_diag("%s: mlx5dv_devx_create_event_channel() failed: %m, device "
+                 "QP errors will not be reported",
+                 uct_ib_device_name(&md->super.dev));
+        return UCS_OK;
+    }
+
+    status = ucs_sys_fcntl_modfl(channel->fd, O_NONBLOCK, 0);
+    if (status != UCS_OK) {
+        goto err_destroy_channel;
+    }
+
+    iface->err_event_channel = channel;
+    status = ucs_async_set_event_handler(worker->async->mode, channel->fd,
+                                         UCS_EVENT_SET_EVREAD,
+                                         uct_rc_gdaki_iface_err_event_handler,
+                                         iface, worker->async);
+    if (status != UCS_OK) {
+        iface->err_event_channel = NULL;
+        goto err_destroy_channel;
+    }
+
+    return UCS_OK;
+
+err_destroy_channel:
+    mlx5dv_devx_destroy_event_channel(channel);
+    return status;
+}
+
+static void
+uct_rc_gdaki_iface_remove_err_handler(uct_rc_gdaki_iface_t *iface)
+{
+    if (iface->err_event_channel != NULL) {
+        ucs_async_remove_handler(iface->err_event_channel->fd, 1);
+    }
+}
+
+static void
+uct_rc_gdaki_iface_destroy_err_channel(uct_rc_gdaki_iface_t *iface)
+{
+    if (iface->err_event_channel != NULL) {
+        mlx5dv_devx_destroy_event_channel(iface->err_event_channel);
+        iface->err_event_channel = NULL;
+    }
+}
+
 static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_iface_t, uct_md_h tl_md,
                            uct_worker_h worker,
                            const uct_iface_params_t *params,
@@ -1322,6 +1661,12 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_iface_t, uct_md_h tl_md,
         goto err_lock;
     }
 
+    /* Before the channel pool, since its CQs are subscribed to the channel */
+    status = uct_rc_gdaki_iface_init_err_events(self);
+    if (status != UCS_OK) {
+        goto err_err_events;
+    }
+
     if (self->ep_alloc_mode == UCT_RC_GDAKI_EP_ALLOC_MODE_POOL) {
         status = uct_rc_gdaki_iface_init_channel_pool(self, config);
         if (status != UCS_OK) {
@@ -1337,6 +1682,9 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_iface_t, uct_md_h tl_md,
     return UCS_OK;
 
 err_pool:
+    uct_rc_gdaki_iface_remove_err_handler(self);
+    uct_rc_gdaki_iface_destroy_err_channel(self);
+err_err_events:
     pthread_mutex_destroy(&self->ep_init_lock);
 err_lock:
     ibv_dereg_mr(self->atomic_mr);
@@ -1347,6 +1695,7 @@ err_atomic_buff:
 
 static UCS_CLASS_CLEANUP_FUNC(uct_rc_gdaki_iface_t)
 {
+    uct_rc_gdaki_iface_remove_err_handler(self);
     pthread_mutex_destroy(&self->ep_init_lock);
     ibv_dereg_mr(self->atomic_mr);
     ucs_free(self->atomic_buff);
@@ -1354,10 +1703,14 @@ static UCS_CLASS_CLEANUP_FUNC(uct_rc_gdaki_iface_t)
         uct_rc_gdaki_iface_cleanup_channel_pool(self);
     }
 
+    /* After the channel CQs are destroyed */
+    uct_rc_gdaki_iface_destroy_err_channel(self);
+
     if (self->uar_wrap != NULL) {
         uct_worker_tl_data_put(self->uar_wrap, uct_rc_gdaki_devx_uar_cleanup);
         self->uar_wrap = NULL;
     }
+
 
     if (self->cuda.ctx != NULL) {
         (void)UCT_CUDADRV_FUNC_LOG_WARN(
