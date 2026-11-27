@@ -484,6 +484,13 @@ ucp_worker_iface_handle_uct_ep_failure(ucp_ep_h ucp_ep, ucp_lane_index_t lane,
         }
     }
 
+    /* A device lane does not take the host lane failure flows */
+    if (ucp_ep_config(ucp_ep)->key.lanes[lane].lane_types &
+        UCS_BIT(UCP_LANE_TYPE_DEVICE)) {
+        ucp_ep_device_lane_failed(ucp_ep, lane, status);
+        return UCS_OK;
+    }
+
     /* The lane slot may already be the replacement. This error belongs
      * to the transport endpoint that is still held. */
     if (ucp_ep_tf_is_held(ucp_ep, lane, uct_ep)) {

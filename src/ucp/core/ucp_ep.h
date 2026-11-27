@@ -626,6 +626,11 @@ typedef struct ucp_ep_ext {
         uint64_t                  psn;
     } am;
 
+    ucp_lane_map_t                failed_device_lanes; /* Device lanes whose
+                                                          transport endpoint
+                                                          failed */
+    struct ucp_device_lane_resets *device_lane_resets; /* Resets of failed
+                                                          device lanes */
     ucp_lane_map_t                unflushed_lanes; /* Bitmap of lanes which have
                                                       unflushed operations */
     uint64_t                      fence_seq;       /* Sequence number for fence
@@ -679,6 +684,8 @@ typedef struct ucp_ep {
         unsigned                      discard;
         /* How many recovery aux probes are in-progress on the EP */
         unsigned                      probe;
+        /* How many device lane reset progress calls are scheduled */
+        unsigned                      device_reset;
     } refcounts;
 #endif
 
@@ -1262,6 +1269,28 @@ int ucp_ep_recovery_progress(ucp_ep_h ep);
 ucp_lane_map_t
 ucp_ep_recovery_rebuild_lanes(ucp_ep_h ep, ucp_lane_map_t lanes_to_rebuild,
                               const ucp_unpacked_address_t *remote_address);
+
+
+/**
+ * Handle a failure of the transport endpoint of a device lane. Device code
+ * reaches that endpoint through memory lists, so it is never discarded here.
+ */
+void ucp_ep_device_lane_failed(ucp_ep_h ep, ucp_lane_index_t lane,
+                               ucs_status_t status);
+
+
+/**
+ * Handle a device lane reset message from the peer, with its RX token.
+ */
+void ucp_ep_device_lane_reset_received(ucp_ep_h ep, ucp_lane_index_t lane,
+                                       uint32_t round, const void *token,
+                                       size_t token_length);
+
+
+/**
+ * Release the device lane reset state of an endpoint.
+ */
+void ucp_ep_device_lane_resets_free(ucp_ep_h ep);
 
 
 /**

@@ -52,6 +52,7 @@ enum {
     UCP_WIREUP_MSG_LANES_ADDR_REQUEST,
     UCP_WIREUP_MSG_LANES_ADDR_REPLY,
     UCP_WIREUP_MSG_LANES_ADDR_ACK,
+    UCP_WIREUP_MSG_DEVICE_LANE_RESET,
 
     UCP_WIREUP_MSG_LAST
 };
@@ -155,6 +156,17 @@ typedef struct ucp_wireup_msg {
 } UCS_S_PACKED ucp_wireup_msg_t;
 
 
+/*
+ * Payload of a DEVICE_LANE_RESET message, followed by the RX token of the
+ * device lane of the sender
+ */
+typedef struct ucp_wireup_msg_device_lane_reset {
+    uint32_t round;        /* Reset round of the lane */
+    uint16_t token_length; /* Length of the RX token */
+    uint8_t  lane;         /* Device lane, same index on both peers */
+} UCS_S_PACKED ucp_wireup_msg_device_lane_reset_t;
+
+
 typedef struct ucp_wireup_msg_lanes_info_t {
     /* Lanes the sender asked about. Empty in a REQUEST, which answers nothing.
      * When the token trailer is present, these are also the RX-token lanes. */
@@ -198,6 +210,11 @@ typedef struct {
 
 
 ucs_status_t ucp_wireup_send_request(ucp_ep_h ep);
+
+ucs_status_t
+ucp_wireup_send_device_lane_reset(ucp_ep_h ep, ucp_lane_index_t lane,
+                                  uint32_t round, const void *token,
+                                  size_t token_length);
 
 ucs_status_t ucp_wireup_send_pre_request(ucp_ep_h ep);
 

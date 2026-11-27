@@ -16,6 +16,7 @@
 #include <ucp/api/device/ucp_host.h>
 #include <ucp/api/device/ucp_device_types.h>
 #include <ucs/type/param.h>
+#include <ucp/wireup/wireup.h>
 #include <ucp/wireup/wireup_ep.h>
 #include <uct/api/v2/uct_v2.h>
 
@@ -994,4 +995,536 @@ uint64_t ucp_device_counter_read(ucp_worker_h worker,
                        sizeof(counter_value), (ucs_memory_type_t)mem_info.type,
                        resolved, sizeof(counter_value));
     return counter_value;
+}
+
+/* Size of the buffers for the RX tokens of a device lane */
+#define UCP_DEVICE_LANE_TOKEN_MAX 1024
+
+/* How often a peer sends its RX token again, until it gets the token of the
+ * other peer, since a message on a failed lane may be lost */
+#define UCP_DEVICE_LANE_TOKEN_RESEND_SEC 1.0
+
+
+/*
+ * Failover of a failed device lane. Each peer pauses its transport endpoint
+ * and sends its RX token to the other one. With both, a peer moves what the
+ * other one did not receive to another device lane. A peer which receives a
+ * token before it noticed the failure joins the round. A peer without a lane
+ * to move to fails the lane, and sends an empty token, so the other one does
+ * not wait for its token. Rounds are counted by both peers alike, to drop late
+ * messages.
+ */
+typedef struct ucp_device_lane_reset {
+    ucp_ep_h         ep;
+    ucp_lane_index_t lane;
+    uint32_t         round;      /* Current round, or the last one */
+    uint8_t          active;     /* The round is in progress */
+    uint8_t          scheduled;  /* Progress is scheduled */
+    uint8_t          paused;     /* The endpoint is paused, token is set */
+    uint8_t          sent;       /* The token was sent to the peer */
+    uint8_t          has_peer;   /* The peer token is set */
+    uint8_t          failed;     /* Device operations on the lane fail */
+    ucp_lane_index_t to_lane;    /* Lane to move to, chosen once per round */
+    ucs_time_t       sent_time;  /* When the token was sent last */
+    size_t           token_length;
+    size_t           peer_token_length;
+    uint8_t          token[UCP_DEVICE_LANE_TOKEN_MAX];
+    uint8_t          peer_token[UCP_DEVICE_LANE_TOKEN_MAX];
+} ucp_device_lane_reset_t;
+
+
+struct ucp_device_lane_resets {
+    ucp_device_lane_reset_t *lanes[UCP_MAX_LANES];
+};
+
+
+static ucp_device_lane_reset_t *
+ucp_device_lane_reset_get(ucp_ep_h ep, ucp_lane_index_t lane)
+{
+    ucp_device_lane_reset_t *reset;
+
+    if (ep->ext->device_lane_resets == NULL) {
+        ep->ext->device_lane_resets = ucs_calloc(
+                1, sizeof(*ep->ext->device_lane_resets),
+                "ucp_device_lane_resets");
+        if (ep->ext->device_lane_resets == NULL) {
+            return NULL;
+        }
+    }
+
+    reset = ep->ext->device_lane_resets->lanes[lane];
+    if (reset == NULL) {
+        reset = ucs_calloc(1, sizeof(*reset), "ucp_device_lane_reset");
+        if (reset == NULL) {
+            return NULL;
+        }
+
+        reset->ep                                 = ep;
+        reset->lane                               = lane;
+        ep->ext->device_lane_resets->lanes[lane] = reset;
+    }
+
+    return reset;
+}
+
+void ucp_ep_device_lane_resets_free(ucp_ep_h ep)
+{
+    ucp_lane_index_t lane;
+
+    if (ep->ext->device_lane_resets == NULL) {
+        return;
+    }
+
+    for (lane = 0; lane < UCP_MAX_LANES; ++lane) {
+        /* Progress holds a reference to the endpoint */
+        ucs_assert((ep->ext->device_lane_resets->lanes[lane] == NULL) ||
+                   !ep->ext->device_lane_resets->lanes[lane]->scheduled);
+        ucs_free(ep->ext->device_lane_resets->lanes[lane]);
+    }
+
+    ucs_free(ep->ext->device_lane_resets);
+    ep->ext->device_lane_resets = NULL;
+}
+
+/* Lanes to translate the memory keys between, see ucp_device_failover_key() */
+typedef struct {
+    ucp_rsc_index_t from_rsc;
+    ucp_rsc_index_t to_rsc;
+} ucp_device_failover_key_arg_t;
+
+
+static int ucp_device_mem_list_keys_lane(const ucp_device_mem_list_keys_t *keys,
+                                         ucp_rsc_index_t rsc)
+{
+    unsigned i;
+
+    for (i = 0; i < keys->num_lanes; ++i) {
+        if (keys->rscs[i] == rsc) {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+/* Find the key in the memory lists, and return the key of the same element
+ * for the other lane */
+static ucs_status_t ucp_device_failover_key(void *arg, int is_remote,
+                                            uint32_t key, uint32_t *key_p)
+{
+    const ucp_device_failover_key_arg_t *key_arg = arg;
+    ucs_status_t status                         = UCS_ERR_NO_ELEM;
+    const uct_device_remote_mem_elem_t *remote_elem;
+    const uct_device_local_mem_elem_t *local_elem;
+    const ucp_device_mem_list_keys_t *keys;
+    ucp_device_handle_info_t *info;
+    int from, to;
+    uint32_t i, length;
+    const void *elem;
+    khiter_t iter;
+
+    ucs_spin_lock(&ucp_device_handle_hash_lock);
+    for (iter = kh_begin(&ucp_device_handle_hash);
+         iter != kh_end(&ucp_device_handle_hash); ++iter) {
+        if (!kh_exist(&ucp_device_handle_hash, iter)) {
+            continue;
+        }
+
+        info = &kh_value(&ucp_device_handle_hash, iter);
+        keys = &info->keys;
+        if ((keys->handle == NULL) || (keys->is_remote != is_remote)) {
+            continue;
+        }
+
+        from = ucp_device_mem_list_keys_lane(keys, key_arg->from_rsc);
+        to   = ucp_device_mem_list_keys_lane(keys, key_arg->to_rsc);
+        if ((from < 0) || (to < 0)) {
+            continue;
+        }
+
+        length = info->mem_list_length;
+        elem   = UCS_PTR_BYTE_OFFSET(keys->handle,
+                                     is_remote ?
+                                     sizeof(ucp_device_remote_mem_list_t) :
+                                     sizeof(ucp_device_local_mem_list_t));
+        for (i = 0; i < length;
+             ++i, elem = UCS_PTR_BYTE_OFFSET(elem, keys->elem_size)) {
+            if (is_remote) {
+                remote_elem = elem;
+                if ((remote_elem->tl[from].ep == NULL) ||
+                    (remote_elem->tl[from].uct.ib_md_mem_element.rkey != key)) {
+                    continue;
+                }
+
+                *key_p = remote_elem->tl[to].uct.ib_md_mem_element.rkey;
+            } else {
+                local_elem = elem;
+                if (local_elem->tl[from].ib_md_mem_element.lkey != key) {
+                    continue;
+                }
+
+                *key_p = local_elem->tl[to].ib_md_mem_element.lkey;
+            }
+
+            status = UCS_OK;
+            goto out;
+        }
+    }
+
+out:
+    ucs_spin_unlock(&ucp_device_handle_hash_lock);
+    if (status != UCS_OK) {
+        ucs_error("no %s key 0x%x of rsc %u in device memory lists",
+                  is_remote ? "remote" : "local", key, key_arg->from_rsc);
+    }
+
+    return status;
+}
+
+/*
+ * The lane a failed device lane moves to: the next one, in the order of the
+ * lanes of the memory lists, which did not fail, as in
+ * ucp_device_select_lane()
+ */
+static ucp_lane_index_t
+ucp_device_failover_target_lane(ucp_ep_h ep, ucp_lane_index_t failed_lane)
+{
+    ucp_rsc_index_t failed_rsc = ucp_ep_get_rsc_index(ep, failed_lane);
+    ucp_lane_index_t target    = UCP_NULL_LANE;
+    ucp_lane_index_t lane;
+    ucp_rsc_index_t rsc, best_rsc, wrap_rsc;
+    ucp_lane_index_t wrap      = UCP_NULL_LANE;
+
+    best_rsc = UCP_NULL_RESOURCE;
+    wrap_rsc = UCP_NULL_RESOURCE;
+    for (lane = 0; lane < ucp_ep_num_lanes(ep); ++lane) {
+        if ((lane == failed_lane) ||
+            !(ucp_ep_config(ep)->key.lanes[lane].lane_types &
+              UCS_BIT(UCP_LANE_TYPE_DEVICE)) ||
+            (ep->ext->failed_device_lanes & UCS_BIT(lane))) {
+            continue;
+        }
+
+        rsc = ucp_ep_get_rsc_index(ep, lane);
+        if (strcmp(ep->worker->context->tl_rscs[rsc].tl_rsc.tl_name,
+                   ep->worker->context->tl_rscs[failed_rsc].tl_rsc.tl_name)) {
+            continue;
+        }
+
+        if ((rsc > failed_rsc) &&
+            ((best_rsc == UCP_NULL_RESOURCE) || (rsc < best_rsc))) {
+            best_rsc = rsc;
+            target   = lane;
+        } else if ((rsc < failed_rsc) &&
+                   ((wrap_rsc == UCP_NULL_RESOURCE) || (rsc < wrap_rsc))) {
+            wrap_rsc = rsc;
+            wrap     = lane;
+        }
+    }
+
+    return (target != UCP_NULL_LANE) ? target : wrap;
+}
+
+static unsigned ucp_device_lane_reset_progress(void *arg);
+
+static void ucp_device_lane_reset_schedule(ucp_device_lane_reset_t *reset)
+{
+    ucp_worker_h worker = reset->ep->worker;
+
+    if (reset->scheduled) {
+        return;
+    }
+
+    reset->scheduled = 1;
+    ucp_ep_refcount_add(reset->ep, device_reset);
+    ucs_callbackq_add_oneshot(&worker->uct->progress_q, reset->ep,
+                              ucp_device_lane_reset_progress, reset);
+    ucp_worker_signal_internal(worker);
+}
+
+static void ucp_device_lane_reset_start(ucp_device_lane_reset_t *reset,
+                                        uint32_t round)
+{
+    reset->round        = round;
+    reset->active       = 1;
+    reset->paused       = 0;
+    reset->sent         = 0;
+    reset->has_peer     = 0;
+    reset->token_length = 0;
+    reset->to_lane      = UCP_NULL_LANE;
+    ucp_device_lane_reset_schedule(reset);
+}
+
+/* Make the device operations on a lane which cannot fail over fail */
+static void ucp_device_lane_fail(ucp_device_lane_reset_t *reset,
+                                 const char *reason, ucs_status_t status)
+{
+    ucp_ep_h ep           = reset->ep;
+    ucp_lane_index_t lane = reset->lane;
+    UCS_STRING_BUFFER_ONSTACK(strb, 64);
+    ucs_status_t fail_status;
+
+    reset->active                 = 0;
+    reset->failed                 = 1;
+    ep->ext->failed_device_lanes |= UCS_BIT(lane);
+
+    ucs_error(UCP_EP_LANE_FMT ": device lane cannot fail over in round %u, %s:"
+              " %s", UCP_EP_LANE_ARG(ep, lane, &strb), reset->round, reason,
+              ucs_status_string(status));
+
+    fail_status = uct_ep_failover_fail(ucp_ep_get_lane(ep, lane));
+    if (fail_status != UCS_OK) {
+        ucs_error(UCP_EP_LANE_FMT ": failed to fail device lane: %s",
+                  UCP_EP_LANE_ARG(ep, lane, &strb),
+                  ucs_status_string(fail_status));
+    }
+}
+
+/* An empty token tells the peer that this side failed the lane */
+static void
+ucp_device_lane_send_failed(ucp_device_lane_reset_t *reset, uint32_t round)
+{
+    (void)ucp_wireup_send_device_lane_reset(reset->ep, reset->lane, round,
+                                            reset->token, 0);
+}
+
+/* Fail a lane without a device lane to move to, and tell the peer */
+static void
+ucp_device_lane_fail_no_target(ucp_device_lane_reset_t *reset, uint32_t round)
+{
+    reset->round = round;
+    ucp_device_lane_fail(reset, "no device lane to fail over to",
+                         UCS_ERR_UNREACHABLE);
+    ucp_device_lane_send_failed(reset, round);
+}
+
+static ucs_status_t ucp_device_lane_reset_send(ucp_device_lane_reset_t *reset)
+{
+    ucs_status_t status;
+
+    status = ucp_wireup_send_device_lane_reset(reset->ep, reset->lane,
+                                               reset->round, reset->token,
+                                               reset->token_length);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    reset->sent      = 1;
+    reset->sent_time = ucs_get_time();
+    return UCS_OK;
+}
+
+static unsigned ucp_device_lane_reset_progress(void *arg)
+{
+    ucp_device_lane_reset_t *reset = arg;
+    ucp_ep_h ep                    = reset->ep;
+    ucp_lane_index_t lane          = reset->lane;
+    UCS_STRING_BUFFER_ONSTACK(strb, 64);
+    ucp_device_failover_key_arg_t key_arg;
+    ucp_lane_index_t to_lane;
+    uct_ep_h uct_ep;
+    ucs_status_t status;
+    size_t length;
+
+    UCS_ASYNC_BLOCK(&ep->worker->async);
+
+    reset->scheduled = 0;
+    if (ep->flags & (UCP_EP_FLAG_FAILED | UCP_EP_FLAG_CLOSED)) {
+        reset->active = 0;
+        goto out;
+    }
+
+    uct_ep = ucp_ep_get_lane(ep, lane);
+    if (!reset->paused) {
+        length = sizeof(reset->token);
+        status = uct_ep_failover_pause(uct_ep, reset->token, &length);
+        if (status == UCS_ERR_NO_RESOURCE) {
+            /* The device did not finish posting yet */
+            ucp_device_lane_reset_schedule(reset);
+            goto out;
+        } else if (status != UCS_OK) {
+            ucp_device_lane_fail(reset, "pause failed", status);
+            ucp_device_lane_send_failed(reset, reset->round);
+            goto out;
+        }
+
+        reset->paused       = 1;
+        reset->token_length = length;
+    }
+
+    if (!reset->sent ||
+        (!reset->has_peer &&
+         (ucs_get_time() - reset->sent_time) >
+                 ucs_time_from_sec(UCP_DEVICE_LANE_TOKEN_RESEND_SEC))) {
+        status = ucp_device_lane_reset_send(reset);
+        if (status != UCS_OK) {
+            ucp_device_lane_fail(reset, "sending the RX token failed",
+                                 status);
+            goto out;
+        }
+    }
+
+    if (!reset->has_peer) {
+        /* Continued by the token of the peer, send it again meanwhile */
+        ucp_device_lane_reset_schedule(reset);
+        goto out;
+    }
+
+    /* Fail over to another device lane, which device operations of the
+     * failed lane use from now on. Another lane may fail meanwhile. */
+    if (reset->to_lane == UCP_NULL_LANE) {
+        reset->to_lane = ucp_device_failover_target_lane(ep, lane);
+        if (reset->to_lane == UCP_NULL_LANE) {
+            ucp_device_lane_fail_no_target(reset, reset->round);
+            goto out;
+        }
+    }
+
+    to_lane = reset->to_lane;
+
+    key_arg.from_rsc = ucp_ep_get_rsc_index(ep, lane);
+    key_arg.to_rsc   = ucp_ep_get_rsc_index(ep, to_lane);
+    status           = uct_ep_failover_move(uct_ep,
+                                            ucp_ep_get_lane(ep, to_lane),
+                                            reset->peer_token,
+                                            reset->peer_token_length,
+                                            ucp_device_failover_key, &key_arg);
+    if (status == UCS_ERR_NO_RESOURCE) {
+        ucp_device_lane_reset_schedule(reset);
+        goto out;
+    } else if (status != UCS_OK) {
+        ucp_device_lane_fail(reset, "moving to another lane failed", status);
+        ucp_device_lane_send_failed(reset, reset->round);
+        goto out;
+    }
+
+    ucs_diag(UCP_EP_LANE_FMT ": device lane failed over to lane[%d] in round"
+             " %u", UCP_EP_LANE_ARG(ep, lane, &strb), to_lane, reset->round);
+
+    /* The lane stays failed until it recovers */
+    reset->active = 0;
+
+out:
+    UCS_ASYNC_UNBLOCK(&ep->worker->async);
+    ucp_ep_refcount_remove(ep, device_reset); /* may destroy the EP */
+    return 1;
+}
+
+void ucp_ep_device_lane_failed(ucp_ep_h ep, ucp_lane_index_t lane,
+                               ucs_status_t status)
+{
+    UCS_STRING_BUFFER_ONSTACK(strb, 64);
+    ucp_device_lane_reset_t *reset;
+
+    if (ep->ext->failed_device_lanes & UCS_BIT(lane)) {
+        return;
+    }
+
+    ep->ext->failed_device_lanes |= UCS_BIT(lane);
+    /* Only a lane whose transport retries ran out can fail over, see
+     * UCT_EP_PARAM_FLAG_FAILOVER */
+    if (!ucp_ep_err_mode_eq(ep, UCP_ERR_HANDLING_MODE_FAILOVER) ||
+        (status != UCS_ERR_ENDPOINT_TIMEOUT)) {
+        /* Device operations on this lane fail on the device */
+        ucs_diag(UCP_EP_LANE_FMT ": device lane failed: %s, not handled",
+                 UCP_EP_LANE_ARG(ep, lane, &strb), ucs_status_string(status));
+        return;
+    }
+
+    reset = ucp_device_lane_reset_get(ep, lane);
+    if (reset == NULL) {
+        ucs_error(UCP_EP_LANE_FMT ": failed to allocate device lane reset",
+                  UCP_EP_LANE_ARG(ep, lane, &strb));
+        return;
+    }
+
+    if (reset->active || reset->failed) {
+        /* The peer started the round already, or the lane failed */
+        return;
+    }
+
+    if (ucp_device_failover_target_lane(ep, lane) == UCP_NULL_LANE) {
+        ucp_device_lane_fail_no_target(reset, reset->round + 1);
+        return;
+    }
+
+    ucs_diag(UCP_EP_LANE_FMT ": device lane failed: %s, resetting it in round"
+             " %u", UCP_EP_LANE_ARG(ep, lane, &strb), ucs_status_string(status),
+             reset->round + 1);
+    ucp_device_lane_reset_start(reset, reset->round + 1);
+}
+
+void ucp_ep_device_lane_reset_received(ucp_ep_h ep, ucp_lane_index_t lane,
+                                       uint32_t round, const void *token,
+                                       size_t token_length)
+{
+    UCS_STRING_BUFFER_ONSTACK(strb, 64);
+    ucp_device_lane_reset_t *reset;
+
+    if ((lane >= ucp_ep_num_lanes(ep)) ||
+        !(ucp_ep_config(ep)->key.lanes[lane].lane_types &
+          UCS_BIT(UCP_LANE_TYPE_DEVICE)) ||
+        (token_length > UCP_DEVICE_LANE_TOKEN_MAX)) {
+        ucs_error("ep %p: invalid device lane reset message, lane %u token"
+                  " length %zu", ep, lane, token_length);
+        return;
+    }
+
+    reset = ucp_device_lane_reset_get(ep, lane);
+    if (reset == NULL) {
+        ucs_error(UCP_EP_LANE_FMT ": failed to allocate device lane reset",
+                  UCP_EP_LANE_ARG(ep, lane, &strb));
+        return;
+    }
+
+    if (reset->failed) {
+        if (token_length != 0) {
+            /* The peer did not get the message that the lane failed */
+            ucp_device_lane_send_failed(reset, round);
+        }
+        return;
+    }
+
+    if (token_length == 0) {
+        /* The peer failed the lane. Wait for its token no more, but finish
+         * moving to another lane once started, which the peer receives. */
+        if ((!reset->active && (round == (reset->round + 1))) ||
+            (reset->active && (round == reset->round) && !reset->has_peer)) {
+            reset->round = round;
+            ucp_device_lane_fail(reset, "the peer failed it",
+                                 UCS_ERR_CONNECTION_RESET);
+        }
+        return;
+    }
+
+    if (!reset->active && (round == (reset->round + 1))) {
+        /* The peer noticed the failure first */
+        if (ucp_device_failover_target_lane(ep, lane) == UCP_NULL_LANE) {
+            ucp_device_lane_fail_no_target(reset, round);
+            return;
+        }
+
+        ucs_diag(UCP_EP_LANE_FMT ": peer resets device lane in round %u",
+                 UCP_EP_LANE_ARG(ep, lane, &strb), round);
+        ep->ext->failed_device_lanes |= UCS_BIT(lane);
+        ucp_device_lane_reset_start(reset, round);
+    } else if (round != reset->round) {
+        ucs_debug(UCP_EP_LANE_FMT ": drop device lane reset of round %u, "
+                  "current round %u",
+                  UCP_EP_LANE_ARG(ep, lane, &strb), round, reset->round);
+        return;
+    } else if (!reset->active || reset->has_peer) {
+        /* The peer sends its token again, so it did not get ours */
+        if (reset->sent) {
+            (void)ucp_device_lane_reset_send(reset);
+        }
+        return;
+    }
+
+    memcpy(reset->peer_token, token, token_length);
+    reset->peer_token_length = token_length;
+    reset->has_peer          = 1;
+    if (reset->sent) {
+        ucp_device_lane_reset_schedule(reset);
+    }
 }

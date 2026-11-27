@@ -266,7 +266,8 @@ static ucp_ep_h ucp_ep_allocate(ucp_worker_h worker, const char *peer_name)
     ep->refcounts.create                  =
     ep->refcounts.flush                   =
     ep->refcounts.discard                 =
-    ep->refcounts.probe                   = 0;
+    ep->refcounts.probe                   =
+    ep->refcounts.device_reset            = 0;
 #endif
     ep->ext->user_data                    = NULL;
     ep->ext->cm_idx                       = UCP_NULL_RESOURCE;
@@ -280,6 +281,8 @@ static ucp_ep_h ucp_ep_allocate(ucp_worker_h worker, const char *peer_name)
 #endif
     ep->ext->peer_mem                     = NULL;
     ep->ext->unflushed_lanes              = 0;
+    ep->ext->failed_device_lanes          = 0;
+    ep->ext->device_lane_resets           = NULL;
     ep->ext->lane_generation              = 0;
     ep->ext->fence_seq                    = 0;
     ep->ext->uct_eps                      = NULL;
@@ -551,6 +554,7 @@ void ucp_ep_destroy_base(ucp_ep_h ep)
     ucp_ep_refcount_assert(ep, flush, ==, 0);
     ucp_ep_refcount_assert(ep, discard, ==, 0);
     ucp_ep_refcount_assert(ep, probe, ==, 0);
+    ucp_ep_refcount_assert(ep, device_reset, ==, 0);
     ucs_assert(ucs_hlist_is_empty(&ep->ext->proto_reqs));
 
     if (!(ep->flags & UCP_EP_FLAG_INTERNAL)) {
@@ -566,6 +570,7 @@ void ucp_ep_destroy_base(ucp_ep_h ep)
         ucp_ep_recovery_arg_free(ep);
     }
 
+    ucp_ep_device_lane_resets_free(ep);
     ucs_vfs_obj_remove(ep);
     ucs_callbackq_remove_oneshot(&worker->uct->progress_q, ep,
                                  ucp_ep_remove_filter, ep);
@@ -1383,7 +1388,8 @@ static void ucp_ep_check_lanes(ucp_ep_h ep)
 {
 #if UCS_ENABLE_ASSERT
     uint8_t num_inprog       = ep->refcounts.discard + ep->refcounts.flush +
-                               ep->refcounts.create + ep->refcounts.probe;
+                               ep->refcounts.create + ep->refcounts.probe +
+                               ep->refcounts.device_reset;
     uint8_t num_failed_tl_ep = 0;
     ucp_lane_index_t lane;
 

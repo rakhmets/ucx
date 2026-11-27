@@ -554,6 +554,11 @@ ucs_status_t ucp_wireup_ep_connect(uct_ep_h uct_ep, unsigned ep_init_flags,
                                UCT_EP_PARAM_FIELD_PATH_INDEX;
     uct_ep_params.path_index = path_index;
     uct_ep_params.iface      = ucp_worker_iface(worker, rsc_index)->iface;
+    if (ep_init_flags & UCP_EP_INIT_ERR_MODE_FAILOVER) {
+        uct_ep_params.field_mask |= UCT_EP_PARAM_FIELD_FLAGS;
+        uct_ep_params.flags       = UCT_EP_PARAM_FLAG_FAILOVER;
+    }
+
     status = uct_ep_create(&uct_ep_params, &next_ep);
     if (status != UCS_OK) {
         /* make Coverity happy */

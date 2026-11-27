@@ -78,6 +78,8 @@ const char* ucp_wireup_msg_str(uint8_t msg_type)
         return "LANES_ADDR_REP";
     case UCP_WIREUP_MSG_LANES_ADDR_ACK:
         return "LANES_ADDR_ACK";
+    case UCP_WIREUP_MSG_DEVICE_LANE_RESET:
+        return "DEVICE_LANE_RESET";
     default:
         return "<unknown>";
     }
@@ -97,6 +99,7 @@ static ucp_lane_index_t ucp_wireup_get_msg_lane(ucp_ep_h ep, uint8_t msg_type)
     ucp_lane_index_t lane, fallback_lane;
 
     if ((msg_type == UCP_WIREUP_MSG_ACK) ||
+        (msg_type == UCP_WIREUP_MSG_DEVICE_LANE_RESET) ||
         ucp_wireup_msg_is_lanes_addr(msg_type)) {
         /* Post-failover, wireup_msg_lane may itself be failed - prefer the
          * re-selected operable AM lane. */
@@ -484,6 +487,70 @@ ucp_wireup_msg_send_full(ucp_ep_h ep, uint8_t type,
 err:
     ucp_ep_set_lanes_failed_schedule(ep, 0, status);
     return status;
+}
+
+ucs_status_t
+ucp_wireup_send_device_lane_reset(ucp_ep_h ep, ucp_lane_index_t lane,
+                                  uint32_t round, const void *token,
+                                  size_t token_length)
+{
+    ucp_wireup_msg_device_lane_reset_t *payload;
+    ucp_request_t *req;
+
+    ucs_assert(ep->flags & UCP_EP_FLAG_REMOTE_ID);
+
+    if (ep->flags & UCP_EP_FLAG_FAILED) {
+        return UCS_ERR_CONNECTION_RESET;
+    }
+
+    req = ucp_request_mem_alloc("wireup_device_lane_reset");
+    if (req == NULL) {
+        return UCS_ERR_NO_MEMORY;
+    }
+
+    payload = ucs_malloc(sizeof(*payload) + token_length,
+                         "wireup_device_lane_reset");
+    if (payload == NULL) {
+        ucp_request_mem_free(req);
+        return UCS_ERR_NO_MEMORY;
+    }
+
+    payload->round        = round;
+    payload->token_length = token_length;
+    payload->lane         = lane;
+    memcpy(payload + 1, token, token_length);
+
+    req->flags                       = 0;
+    req->send.ep                     = ep;
+    req->send.uct.func               = ucp_wireup_msg_progress;
+    req->send.datatype               = ucp_dt_make_contig(1);
+    req->send.buffer                 = payload;
+    req->send.length                 = sizeof(*payload) + token_length;
+    req->send.wireup.msg_hdr.type     = UCP_WIREUP_MSG_DEVICE_LANE_RESET;
+    req->send.wireup.msg_hdr.err_mode = ucp_ep_config(ep)->key.err_mode;
+    req->send.wireup.msg_hdr.conn_sn  = ep->conn_sn;
+    req->send.wireup.msg_hdr.src_ep_id = ucp_ep_local_id(ep);
+    req->send.wireup.msg_hdr.dst_ep_id = ucp_ep_remote_id(ep);
+    ucp_request_send_state_init(req, ucp_dt_make_contig(1), 0);
+    ucp_request_send(req);
+    return UCS_OK;
+}
+
+static void
+ucp_wireup_process_device_lane_reset(ucp_ep_h ep, const ucp_wireup_msg_t *msg,
+                                     size_t length)
+{
+    const ucp_wireup_msg_device_lane_reset_t *payload =
+            (const void*)(msg + 1);
+    if ((length < (sizeof(*msg) + sizeof(*payload))) ||
+        (length < (sizeof(*msg) + sizeof(*payload) + payload->token_length))) {
+        ucs_error("ep %p: invalid device lane reset message length %zu", ep,
+                  length);
+        return;
+    }
+
+    ucp_ep_device_lane_reset_received(ep, payload->lane, payload->round,
+                                      payload + 1, payload->token_length);
 }
 
 static ucs_status_t
@@ -1936,6 +2003,14 @@ static ucs_status_t ucp_wireup_msg_handler(void *arg, void *data,
         }
     }
 
+    if (msg->type == UCP_WIREUP_MSG_DEVICE_LANE_RESET) {
+        /* Carries an RX token instead of addresses */
+        if (ep != NULL) {
+            ucp_wireup_process_device_lane_reset(ep, msg, length);
+        }
+        goto out;
+    }
+
     address_ptr = msg + 1;
     if (ucp_wireup_msg_is_lanes_addr(msg->type)) {
         ucs_assert(ep != NULL);
@@ -3227,6 +3302,14 @@ static void ucp_wireup_msg_dump(ucp_worker_h worker, uct_am_trace_type_t type,
     ucs_status_t status;
     char *p, *end;
     ucp_rsc_index_t tl;
+
+    if (msg->type == UCP_WIREUP_MSG_DEVICE_LANE_RESET) {
+        snprintf(buffer, max, "WIREUP %s [src_ep_id 0x%" PRIx64
+                 " dst_ep_id 0x%" PRIx64 " conn_sn %d]",
+                 ucp_wireup_msg_str(msg->type), msg->src_ep_id,
+                 msg->dst_ep_id, msg->conn_sn);
+        return;
+    }
 
     /* LANES_ADDR_REQ/REPLY carry a ucp_wireup_msg_lanes_info_t between the
      * wireup header and the packed address; skip it before unpacking. */
