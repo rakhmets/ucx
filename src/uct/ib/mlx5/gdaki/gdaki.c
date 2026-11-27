@@ -978,12 +978,13 @@ err_release_ctx:
 /* mlx5 QP state of a QP in error */
 #define UCT_RC_GDAKI_QP_STATE_ERR 6
 
-/* Size of the failover buffer, for small copies */
+/* The failover buffer holds the copies of two work queues, of a failed
+ * endpoint and of the endpoint it moves to, and room for small copies */
 #define UCT_RC_GDAKI_FAILOVER_BUF_EXTRA 4096
 
 static ucs_status_t uct_rc_gdaki_iface_failover_init(uct_rc_gdaki_iface_t *iface)
 {
-    size_t buf_size = UCT_RC_GDAKI_FAILOVER_BUF_EXTRA;
+    size_t wqe_num, buf_size;
     ucs_status_t status;
     CUstream stream;
     void *buf;
@@ -991,6 +992,10 @@ static ucs_status_t uct_rc_gdaki_iface_failover_init(uct_rc_gdaki_iface_t *iface
     if (iface->failover.stream != NULL) {
         return UCS_OK;
     }
+
+    wqe_num  = uct_ib_mlx5_devx_sq_length(iface->super.super.config.tx_qp_len);
+    buf_size = (2 * (wqe_num << DOCA_GPUNETIO_IB_MLX5_WQE_SQ_SHIFT)) +
+               UCT_RC_GDAKI_FAILOVER_BUF_EXTRA;
 
     status = UCT_CUDADRV_FUNC_LOG_ERR(cuCtxPushCurrent(iface->cuda.ctx));
     if (status != UCS_OK) {
@@ -1307,12 +1312,172 @@ static void uct_rc_gdaki_iface_err_event_handler(int fd,
     }
 }
 
+static uint32_t uct_rc_gdaki_wqe_opcode(const void *wqe)
+{
+    return be32toh(*(const uint32_t*)wqe) & 0xff;
+}
+
+static uint32_t uct_rc_gdaki_wqe_be32(const void *wqe, size_t offset)
+{
+    uint32_t value;
+
+    memcpy(&value, UCS_PTR_BYTE_OFFSET(wqe, offset), sizeof(value));
+    return be32toh(value);
+}
+
+/*
+ * Offset of the data segment byte count in the WQEs the device posts, see
+ * uct_rc_mlx5_gda_wqe_prepare_put_or_atomic()
+ */
+#define UCT_RC_GDAKI_WQE_DATA_OFFSET 32
+
+/* Offsets of the remote and local addresses of the device RDMA writes */
+#define UCT_RC_GDAKI_WQE_RADDR_OFFSET 16
+#define UCT_RC_GDAKI_WQE_LADDR_OFFSET 40
+
+static void uct_rc_gdaki_wqe_add_be64(void *wqe, size_t offset, uint64_t add)
+{
+    uint64_t value;
+
+    memcpy(&value, UCS_PTR_BYTE_OFFSET(wqe, offset), sizeof(value));
+    value = htobe64(be64toh(value) + add);
+    memcpy(UCS_PTR_BYTE_OFFSET(wqe, offset), &value, sizeof(value));
+}
+
+/* Number of packets a device WQE is sent in, as the device counts them */
+static unsigned
+uct_rc_gdaki_wqe_num_packets(const void *wqe, unsigned log_path_mtu)
+{
+    uint32_t length;
+
+    switch (uct_rc_gdaki_wqe_opcode(wqe)) {
+    case MLX5_OPCODE_NOP:
+        return 0;
+    case MLX5_OPCODE_RDMA_WRITE:
+        break;
+    default:
+        return 1;
+    }
+
+    length = uct_rc_gdaki_wqe_be32(wqe, UCT_RC_GDAKI_WQE_DATA_OFFSET);
+    return (length == 0) ? 1 :
+           (length + UCS_BIT(log_path_mtu) - 1) >> log_path_mtu;
+}
+
+static uint32_t uct_rc_gdaki_iface_wqe_num(uct_rc_gdaki_iface_t *iface)
+{
+    return uct_ib_mlx5_devx_sq_length(iface->super.super.config.tx_qp_len);
+}
+
+/* Device address of a WQE of a channel */
+static CUdeviceptr
+uct_rc_gdaki_ep_wqe_addr(uct_rc_gdaki_iface_t *iface, uct_rc_gdaki_ep_t *ep,
+                         unsigned ch, uint64_t wqe_idx)
+{
+    uint32_t wqe_num = uct_rc_gdaki_iface_wqe_num(iface);
+
+    return (CUdeviceptr)(ep->channel_block->gpu_ptr + UCT_GDAKI_DEV_EP_SIZE +
+                         (iface->num_channels * UCT_GDAKI_DEV_QP_SIZE) +
+                         ((((uint64_t)ch * wqe_num) + (wqe_idx & (wqe_num - 1)))
+                          << DOCA_GPUNETIO_IB_MLX5_WQE_SQ_SHIFT));
+}
+
+/*
+ * Copy WQEs [first, last) of a channel between device memory and the host
+ * buffer @a wqes, which holds the work queue at the same slots
+ */
+static ucs_status_t
+uct_rc_gdaki_failover_copy_wqes(uct_rc_gdaki_iface_t *iface,
+                                uct_rc_gdaki_ep_t *ep, unsigned ch,
+                                int to_device, void *wqes, uint64_t first,
+                                uint64_t last)
+{
+    uint32_t wqe_num = uct_rc_gdaki_iface_wqe_num(iface);
+    uint64_t count;
+    uint32_t slot;
+    ucs_status_t status;
+
+    while (first != last) {
+        slot   = first & (wqe_num - 1);
+        count  = ucs_min(last - first, wqe_num - slot);
+        status = uct_rc_gdaki_failover_copy(
+                iface, to_device, uct_rc_gdaki_ep_wqe_addr(iface, ep, ch, first),
+                UCS_PTR_BYTE_OFFSET(wqes,
+                                    slot << DOCA_GPUNETIO_IB_MLX5_WQE_SQ_SHIFT),
+                count << DOCA_GPUNETIO_IB_MLX5_WQE_SQ_SHIFT);
+        if (status != UCS_OK) {
+            return status;
+        }
+
+        first += count;
+    }
+
+    return UCS_OK;
+}
+
 static ucs_status_t
 uct_rc_gdaki_failover_write_paused(uct_rc_gdaki_iface_t *iface,
                                    uct_rc_gdaki_ep_t *ep, uint8_t paused)
 {
     return uct_rc_gdaki_failover_write_dev_ep(
             iface, ep, ucs_offsetof(uct_rc_gdaki_dev_ep_t, paused), paused);
+}
+
+/* Write the doorbell record of a channel and ring its doorbell with the
+ * control segment of the last WQE */
+static ucs_status_t
+uct_rc_gdaki_failover_ring_db(uct_rc_gdaki_iface_t *iface,
+                              uct_rc_gdaki_ep_t *ep, unsigned ch,
+                              uint16_t wqe_next, const void *last_wqe)
+{
+    uint32_t *buf = uct_rc_gdaki_failover_scratch(iface);
+    ucs_status_t status;
+
+    buf[0] = htobe32(wqe_next);
+    status = uct_rc_gdaki_failover_copy(
+            iface, 1,
+            uct_rc_gdaki_ep_dev_qp_addr(ep, ch) +
+                    ucs_offsetof(uct_rc_gdaki_dev_qp_t, qp_dbrec) +
+                    (sizeof(uint32_t) * MLX5_SND_DBR),
+            buf, sizeof(uint32_t));
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    if (last_wqe != NULL) {
+        ucs_memory_bus_store_fence();
+        *(volatile uint64_t*)iface->uar_wrap->uar->super.addr.ptr =
+                *(const uint64_t*)last_wqe;
+        ucs_memory_bus_store_fence();
+    }
+
+    return UCS_OK;
+}
+
+/* Write the completion of a channel: of WQE wqe_cnt, or none if NULL */
+static ucs_status_t
+uct_rc_gdaki_failover_write_cqe(uct_rc_gdaki_iface_t *iface,
+                                uct_rc_gdaki_ep_t *ep, unsigned ch,
+                                const uint16_t *wqe_cnt)
+{
+    uint8_t *buf = uct_rc_gdaki_failover_scratch(iface);
+
+    if (wqe_cnt == NULL) {
+        /* As initialized in uct_rc_gdaki_ep_get_device_ep() */
+        memset(buf, 0xff, 4);
+    } else {
+        buf[0] = *wqe_cnt >> 8; /* wqe_counter, big endian */
+        buf[1] = *wqe_cnt & 0xff;
+        buf[2] = 0;             /* signature */
+        buf[3] = 0;             /* op_own: MLX5_CQE_REQ */
+    }
+
+    return uct_rc_gdaki_failover_copy(
+            iface, 1,
+            uct_rc_gdaki_ep_dev_qp_addr(ep, ch) +
+                    ucs_offsetof(uct_rc_gdaki_dev_qp_t, cq_buff) +
+                    ucs_offsetof(struct mlx5_cqe64, wqe_counter),
+            buf, 4);
 }
 
 /* Move the QPs of all channels to the error state, unless they are there */
@@ -1410,6 +1575,476 @@ uct_rc_gdaki_ep_failover_pause(uct_ep_h tl_ep, void *rx_token,
     return UCS_OK;
 }
 
+/*
+ * Skip the first packets of an RDMA write WQE, which the peer received. A
+ * packet carries a full path MTU of data, except the last one.
+ */
+static void uct_rc_gdaki_wqe_skip_packets(void *wqe, unsigned num_packets,
+                                          unsigned log_path_mtu)
+{
+    uint32_t offset = num_packets << log_path_mtu;
+    uint32_t length = uct_rc_gdaki_wqe_be32(wqe, UCT_RC_GDAKI_WQE_DATA_OFFSET);
+
+    ucs_assert(uct_rc_gdaki_wqe_opcode(wqe) == MLX5_OPCODE_RDMA_WRITE);
+    ucs_assert(offset < length);
+
+    uct_rc_gdaki_wqe_add_be64(wqe, UCT_RC_GDAKI_WQE_RADDR_OFFSET, offset);
+    uct_rc_gdaki_wqe_add_be64(wqe, UCT_RC_GDAKI_WQE_LADDR_OFFSET, offset);
+    length = htobe32(length - offset);
+    memcpy(UCS_PTR_BYTE_OFFSET(wqe, UCT_RC_GDAKI_WQE_DATA_OFFSET), &length,
+           sizeof(length));
+}
+
+/*
+ * Find the WQEs of a channel the peer did not receive, from the first one it
+ * did not receive in full to the last ready one, and copy the work queue to
+ * @a wq. The device counts the packets of the ready WQEs, which is the PSN
+ * that follows them, so the first WQE is found by walking back from the last
+ * one. The copy of the first WQE skips the packets the peer received.
+ */
+static ucs_status_t
+uct_rc_gdaki_ep_find_lost(uct_rc_gdaki_iface_t *iface, uct_rc_gdaki_ep_t *ep,
+                          unsigned ch, uint32_t peer_rcv_psn, void *wq,
+                          uint64_t *first_p, uint64_t *ready_p,
+                          uint32_t *ready_psn_p, uint32_t *num_packets_p)
+{
+    uct_rc_gdaki_channel_t *channel = &ep->channel_block->channels[ch];
+    uint32_t wqe_num                = uct_rc_gdaki_iface_wqe_num(iface);
+    void *wqe                       = NULL;
+    uct_rc_gdaki_dev_qp_t *dev_qp;
+    uint32_t ready_psn, end_psn, num_lost, num_packets;
+    uint64_t ready, first;
+    ucs_status_t status;
+
+    status = uct_rc_gdaki_failover_read_dev_qp(iface, ep, ch, &dev_qp);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    ready     = dev_qp->sq_ready_index;
+    ready_psn = dev_qp->sq_ready_psn;
+    end_psn   = ready_psn & UCT_IB_MLX5_PSN_MASK;
+    num_lost  = (end_psn - peer_rcv_psn) & UCT_IB_MLX5_PSN_MASK;
+
+    status = uct_rc_gdaki_failover_copy_wqes(
+            iface, ep, ch, 0, wq, (ready > wqe_num) ? (ready - wqe_num) : 0,
+            ready);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    num_packets = 0;
+    first       = ready;
+    while (num_packets < num_lost) {
+        if ((first == 0) || ((ready - first) >= wqe_num)) {
+            ucs_error("ep %p: channel %u: %u lost packets are not in the work"
+                      " queue, end psn 0x%x peer psn 0x%x",
+                      ep, ch, num_lost, end_psn, peer_rcv_psn);
+            return UCS_ERR_IO_ERROR;
+        }
+
+        --first;
+        wqe          = UCS_PTR_BYTE_OFFSET(
+                wq, (first & (wqe_num - 1)) << DOCA_GPUNETIO_IB_MLX5_WQE_SQ_SHIFT);
+        num_packets += uct_rc_gdaki_wqe_num_packets(wqe, ep->log_path_mtu);
+    }
+
+    ucs_debug("ep %p: channel %u qp 0x%x: ready %" PRIu64 " first %" PRIu64
+              " end psn 0x%x peer psn 0x%x lost packets %u, received %u"
+              " packets of the first WQE", ep, ch, channel->qp.super.qp_num,
+              ready, first, end_psn, peer_rcv_psn, num_lost,
+              num_packets - num_lost);
+
+    if (num_packets > num_lost) {
+        uct_rc_gdaki_wqe_skip_packets(wqe, num_packets - num_lost,
+                                      ep->log_path_mtu);
+    }
+
+    *first_p       = first;
+    *ready_p       = ready;
+    *ready_psn_p   = ready_psn;
+    *num_packets_p = num_lost;
+    return UCS_OK;
+}
+
+/*
+ * Offsets in the WQEs the device posts, see
+ * uct_rc_mlx5_gda_wqe_prepare_put_or_atomic(): control, remote address, then
+ * the atomic segment for atomics, then the data segment.
+ */
+#define UCT_RC_GDAKI_WQE_RKEY_OFFSET          24
+#define UCT_RC_GDAKI_WQE_PUT_LKEY_OFFSET      36
+#define UCT_RC_GDAKI_WQE_ATOMIC_LKEY_OFFSET   52
+#define UCT_RC_GDAKI_WQE_ATOMIC_LADDR_OFFSET  56
+
+static void uct_rc_gdaki_wqe_set32(void *wqe, size_t offset, uint32_t value)
+{
+    memcpy(UCS_PTR_BYTE_OFFSET(wqe, offset), &value, sizeof(value));
+}
+
+static uint32_t uct_rc_gdaki_wqe_get32(const void *wqe, size_t offset)
+{
+    uint32_t value;
+
+    memcpy(&value, UCS_PTR_BYTE_OFFSET(wqe, offset), sizeof(value));
+    return value;
+}
+
+/*
+ * Rewrite a WQE of a channel of ep for a channel of to_ep: WQE index, QP
+ * number, and the keys of the other device. An atomic writes its result to
+ * the atomic buffer of the interface.
+ */
+static ucs_status_t
+uct_rc_gdaki_failover_rewrite_wqe(uct_rc_gdaki_iface_t *to_iface,
+                                  uint32_t to_qp_num, void *wqe,
+                                  uint16_t wqe_idx,
+                                  uct_ep_failover_key_cb_t key_cb, void *arg)
+{
+    struct mlx5_wqe_ctrl_seg *ctrl = wqe;
+    uint32_t opcode                = uct_rc_gdaki_wqe_opcode(wqe);
+    uint32_t ds                    = be32toh(ctrl->qpn_ds) & 0x3f;
+    uint32_t key;
+    uint64_t laddr;
+    ucs_status_t status;
+
+    ctrl->opmod_idx_opcode = htobe32(((uint32_t)wqe_idx << 8) | opcode);
+    ctrl->qpn_ds           = htobe32((to_qp_num << 8) | ds);
+    if (opcode == MLX5_OPCODE_NOP) {
+        return UCS_OK; /* Posted by a device flush */
+    }
+
+    status = key_cb(arg, 1,
+                    uct_rc_gdaki_wqe_get32(wqe, UCT_RC_GDAKI_WQE_RKEY_OFFSET),
+                    &key);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    uct_rc_gdaki_wqe_set32(wqe, UCT_RC_GDAKI_WQE_RKEY_OFFSET, key);
+
+    switch (opcode) {
+    case MLX5_OPCODE_RDMA_WRITE:
+        status = key_cb(arg, 0,
+                        uct_rc_gdaki_wqe_get32(wqe,
+                                               UCT_RC_GDAKI_WQE_PUT_LKEY_OFFSET),
+                        &key);
+        if (status != UCS_OK) {
+            return status;
+        }
+
+        uct_rc_gdaki_wqe_set32(wqe, UCT_RC_GDAKI_WQE_PUT_LKEY_OFFSET, key);
+        return UCS_OK;
+    case MLX5_OPCODE_ATOMIC_FA:
+        uct_rc_gdaki_wqe_set32(wqe, UCT_RC_GDAKI_WQE_ATOMIC_LKEY_OFFSET,
+                               htonl(to_iface->atomic_mr->lkey));
+        laddr = htobe64((uintptr_t)to_iface->atomic_buff);
+        memcpy(UCS_PTR_BYTE_OFFSET(wqe, UCT_RC_GDAKI_WQE_ATOMIC_LADDR_OFFSET),
+               &laddr, sizeof(laddr));
+        return UCS_OK;
+    default:
+        ucs_error("device WQE opcode 0x%x cannot be moved", opcode);
+        return UCS_ERR_UNSUPPORTED;
+    }
+}
+
+/* WQE indexes of a channel: reserved, ready, and the last completed one as
+ * the device computes it */
+static ucs_status_t
+uct_rc_gdaki_failover_indexes(uct_rc_gdaki_iface_t *iface,
+                              uct_rc_gdaki_ep_t *ep, unsigned ch,
+                              uint64_t *rsvd_p, uint64_t *ready_p,
+                              uint64_t *completed_p, uint32_t *ready_psn_p)
+{
+    uct_rc_gdaki_dev_qp_t *dev_qp;
+    struct mlx5_cqe64 *cqe;
+    ucs_status_t status;
+    uint16_t wqe_cnt;
+
+    status = uct_rc_gdaki_failover_read_dev_qp(iface, ep, ch, &dev_qp);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    cqe = (struct mlx5_cqe64*)dev_qp->cq_buff;
+    if ((cqe->op_own >> 4) == MLX5_CQE_REQ_ERR) {
+        return UCS_ERR_IO_ERROR;
+    }
+
+    wqe_cnt      = be16toh(cqe->wqe_counter);
+    *rsvd_p      = dev_qp->sq_rsvd_index;
+    *ready_p     = dev_qp->sq_ready_index;
+    *ready_psn_p = dev_qp->sq_ready_psn;
+    *completed_p = *rsvd_p - ((*rsvd_p - wqe_cnt) & 0xffff);
+    return UCS_OK;
+}
+
+/* Post the lost WQEs of a channel of ep to the same channel of to_ep, whose
+ * device posting is paused */
+static ucs_status_t
+uct_rc_gdaki_failover_move_channel(uct_rc_gdaki_iface_t *iface,
+                                   uct_rc_gdaki_ep_t *ep,
+                                   uct_rc_gdaki_iface_t *to_iface,
+                                   uct_rc_gdaki_ep_t *to_ep, unsigned ch,
+                                   uint32_t peer_rcv_psn,
+                                   uct_ep_failover_key_cb_t key_cb, void *arg)
+{
+    uct_rc_gdaki_channel_t *channel = &ep->channel_block->channels[ch];
+    uint32_t wqe_num                = uct_rc_gdaki_iface_wqe_num(iface);
+    uint32_t to_qp_num = to_ep->channel_block->channels[ch].qp.super.qp_num;
+    void *wq           = iface->failover.buf;
+    void *to_wq        = UCS_PTR_BYTE_OFFSET(
+            to_iface->failover.buf,
+            (size_t)wqe_num << DOCA_GPUNETIO_IB_MLX5_WQE_SQ_SHIFT);
+    uint32_t ready_psn, num_packets, to_ready_psn;
+    uint64_t first, ready, idx, to_rsvd, to_completed, to_ready;
+    uint64_t *indexes;
+    void *wqe;
+    ucs_status_t status;
+
+    status = uct_rc_gdaki_ep_find_lost(iface, ep, ch, peer_rcv_psn, wq, &first,
+                                       &ready, &ready_psn, &num_packets);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    channel->moved_ready = ready;
+    channel->moved_end   = 0;
+    if (first == ready) {
+        return UCS_OK;
+    }
+
+    /* Room in the work queue of to_ep, as the device computes it */
+    status = uct_rc_gdaki_failover_indexes(to_iface, to_ep, ch, &to_rsvd,
+                                           &to_ready, &to_completed,
+                                           &to_ready_psn);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    ucs_assert(to_ready == to_rsvd);
+    if ((to_rsvd + (ready - first)) > (to_completed + wqe_num + 1)) {
+        return UCS_ERR_NO_RESOURCE;
+    }
+
+    for (idx = first; idx < ready; ++idx) {
+        wqe = UCS_PTR_BYTE_OFFSET(to_wq, ((to_ready + idx - first) &
+                                          (wqe_num - 1))
+                                                 << DOCA_GPUNETIO_IB_MLX5_WQE_SQ_SHIFT);
+        memcpy(wqe,
+               UCS_PTR_BYTE_OFFSET(wq, (idx & (wqe_num - 1))
+                                               << DOCA_GPUNETIO_IB_MLX5_WQE_SQ_SHIFT),
+               UCS_BIT(DOCA_GPUNETIO_IB_MLX5_WQE_SQ_SHIFT));
+        status = uct_rc_gdaki_failover_rewrite_wqe(to_iface, to_qp_num, wqe,
+                                                   to_ready + idx - first,
+                                                   key_cb, arg);
+        if (status != UCS_OK) {
+            return status;
+        }
+    }
+
+    /* The device requests completions only for some WQEs, and the host waits
+     * for the completion of the last moved one */
+    wqe = UCS_PTR_BYTE_OFFSET(to_wq, ((to_ready + (ready - first) - 1) &
+                                      (wqe_num - 1))
+                                             << DOCA_GPUNETIO_IB_MLX5_WQE_SQ_SHIFT);
+    ((struct mlx5_wqe_ctrl_seg*)wqe)->fm_ce_se |= MLX5_WQE_CTRL_CQ_UPDATE;
+
+    status = uct_rc_gdaki_failover_copy_wqes(to_iface, to_ep, ch, 1, to_wq,
+                                             to_ready,
+                                             to_ready + (ready - first));
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    /* The device continues after the moved WQEs */
+    indexes    = uct_rc_gdaki_failover_scratch(to_iface);
+    indexes[0] = to_ready + (ready - first); /* sq_rsvd_index */
+    indexes[1] = indexes[0];                 /* sq_ready_index */
+    indexes[2] = to_ready_psn + num_packets;
+    UCS_STATIC_ASSERT(ucs_offsetof(uct_rc_gdaki_dev_qp_t, sq_ready_index) ==
+                      ucs_offsetof(uct_rc_gdaki_dev_qp_t, sq_rsvd_index) +
+                      sizeof(uint64_t));
+    status = uct_rc_gdaki_failover_copy(
+            to_iface, 1,
+            uct_rc_gdaki_ep_dev_qp_addr(to_ep, ch) +
+                    ucs_offsetof(uct_rc_gdaki_dev_qp_t, sq_rsvd_index),
+            indexes, 2 * sizeof(uint64_t));
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    *(uint32_t*)indexes = (uint32_t)indexes[2];
+    status = uct_rc_gdaki_failover_copy(
+            to_iface, 1,
+            uct_rc_gdaki_ep_dev_qp_addr(to_ep, ch) +
+                    ucs_offsetof(uct_rc_gdaki_dev_qp_t, sq_ready_psn),
+            indexes, sizeof(uint32_t));
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    ucs_debug("ep %p: channel %u: moved WQEs %" PRIu64 "..%" PRIu64
+              " to ep %p WQEs %" PRIu64 "..%" PRIu64,
+              ep, ch, first, ready, to_ep, to_ready,
+              to_ready + (ready - first));
+    channel->moved_end = to_ready + (ready - first);
+    return uct_rc_gdaki_failover_ring_db(
+            to_iface, to_ep, ch, channel->moved_end,
+            UCS_PTR_BYTE_OFFSET(to_wq, ((channel->moved_end - 1) &
+                                        (wqe_num - 1))
+                                               << DOCA_GPUNETIO_IB_MLX5_WQE_SQ_SHIFT));
+}
+
+static ucs_status_t
+uct_rc_gdaki_ep_failover_move(uct_ep_h tl_ep, uct_ep_h tl_to_ep,
+                              const void *peer_rx_token,
+                              size_t peer_rx_token_length,
+                              uct_ep_failover_key_cb_t key_cb, void *arg)
+{
+    uct_rc_gdaki_ep_t *ep          = ucs_derived_of(tl_ep, uct_rc_gdaki_ep_t);
+    uct_rc_gdaki_iface_t *iface    = ucs_derived_of(tl_ep->iface,
+                                                    uct_rc_gdaki_iface_t);
+    uct_rc_gdaki_ep_t *to_ep       = ucs_derived_of(tl_to_ep,
+                                                    uct_rc_gdaki_ep_t);
+    uct_rc_gdaki_iface_t *to_iface = ucs_derived_of(tl_to_ep->iface,
+                                                    uct_rc_gdaki_iface_t);
+    uint64_t to_rsvd, to_ready, to_completed;
+    uint32_t to_ready_psn;
+    uint16_t wqe_cnt;
+    ucs_status_t status;
+    uint8_t *buf;
+    unsigned ch;
+
+    if (!ep->failover || !ep->paused ||
+        (ucs_derived_of(tl_to_ep->iface, uct_base_iface_t)->internal_ops !=
+         ucs_derived_of(tl_ep->iface, uct_base_iface_t)->internal_ops) ||
+        (to_iface->num_channels != iface->num_channels) ||
+        (peer_rx_token_length != (iface->num_channels * sizeof(uint32_t)))) {
+        return UCS_ERR_INVALID_PARAM;
+    }
+
+    if (!ep->dev_ep_init) {
+        /* No memory list refers to the device endpoint */
+        return UCS_OK;
+    }
+
+    if (!to_ep->dev_ep_init || to_ep->paused) {
+        return UCS_ERR_UNSUPPORTED;
+    }
+
+    if (ep->move_state == UCT_RC_GDAKI_MOVE_STATE_NONE) {
+        /* Stop the device from posting to to_ep meanwhile */
+        status = uct_rc_gdaki_failover_write_paused(to_iface, to_ep, 1);
+        if (status != UCS_OK) {
+            return status;
+        }
+
+        for (ch = 0; ch < iface->num_channels; ++ch) {
+            ep->channel_block->channels[ch].moved_ready = 0;
+            ep->channel_block->channels[ch].moved_end   = 0;
+        }
+
+        ep->move_state = UCT_RC_GDAKI_MOVE_STATE_PAUSING;
+    }
+
+    if (ep->move_state == UCT_RC_GDAKI_MOVE_STATE_PAUSING) {
+        /* The device must finish the WQEs it reserved on to_ep */
+        for (ch = 0; ch < iface->num_channels; ++ch) {
+            status = uct_rc_gdaki_failover_indexes(to_iface, to_ep, ch,
+                                                   &to_rsvd, &to_ready,
+                                                   &to_completed,
+                                                   &to_ready_psn);
+            if (status != UCS_OK) {
+                goto out_unpause;
+            }
+
+            if (to_ready != to_rsvd) {
+                return UCS_ERR_NO_RESOURCE;
+            }
+        }
+
+        for (ch = 0; ch < iface->num_channels; ++ch) {
+            if (ep->channel_block->channels[ch].moved_end != 0) {
+                continue; /* Moved in a previous call */
+            }
+
+            status = uct_rc_gdaki_failover_move_channel(
+                    iface, ep, to_iface, to_ep, ch,
+                    be32toh(((const uint32_t*)peer_rx_token)[ch]), key_cb,
+                    arg);
+            if (status == UCS_ERR_NO_RESOURCE) {
+                return status; /* to_ep is still paused */
+            } else if (status != UCS_OK) {
+                goto out_unpause;
+            }
+
+            if (ep->channel_block->channels[ch].moved_end == 0) {
+                /* Nothing to move, mark the channel done */
+                ep->channel_block->channels[ch].moved_end = UINT64_MAX;
+            }
+        }
+
+        status = uct_rc_gdaki_failover_write_paused(to_iface, to_ep, 0);
+        if (status != UCS_OK) {
+            return status;
+        }
+
+        ep->move_state = UCT_RC_GDAKI_MOVE_STATE_POSTED;
+    }
+
+    /* The moved WQEs complete on to_ep */
+    for (ch = 0; ch < iface->num_channels; ++ch) {
+        if (ep->channel_block->channels[ch].moved_end == UINT64_MAX) {
+            continue;
+        }
+
+        status = uct_rc_gdaki_failover_indexes(to_iface, to_ep, ch, &to_rsvd,
+                                               &to_ready, &to_completed,
+                                               &to_ready_psn);
+        if (status != UCS_OK) {
+            return status;
+        }
+
+        if ((to_completed + 1) < ep->channel_block->channels[ch].moved_end) {
+            return UCS_ERR_NO_RESOURCE;
+        }
+    }
+
+    /* New device operations must see the endpoint failed before the waiting
+     * ones complete, see ucp_device_select_lane() */
+    buf    = uct_rc_gdaki_failover_scratch(iface);
+    buf[0] = UCT_DEVICE_EP_FLAG_FAILED;
+    status = uct_rc_gdaki_failover_copy(
+            iface, 1,
+            (CUdeviceptr)(ep->channel_block->gpu_ptr +
+                          ucs_offsetof(uct_device_ep_t, flags)),
+            buf, 1);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    for (ch = 0; ch < iface->num_channels; ++ch) {
+        if (ep->channel_block->channels[ch].moved_ready == 0) {
+            continue;
+        }
+
+        wqe_cnt = ep->channel_block->channels[ch].moved_ready - 1;
+        status  = uct_rc_gdaki_failover_write_cqe(iface, ep, ch, &wqe_cnt);
+        if (status != UCS_OK) {
+            return status;
+        }
+    }
+
+    ep->move_state = UCT_RC_GDAKI_MOVE_STATE_DONE;
+    return UCS_OK;
+
+out_unpause:
+    (void)uct_rc_gdaki_failover_write_paused(to_iface, to_ep, 0);
+    ep->move_state = UCT_RC_GDAKI_MOVE_STATE_NONE;
+    return status;
+}
+
 static ucs_status_t uct_rc_gdaki_ep_failover_fail(uct_ep_h tl_ep)
 {
     uct_rc_gdaki_ep_t *ep       = ucs_derived_of(tl_ep, uct_rc_gdaki_ep_t);
@@ -1466,6 +2101,7 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
                             (params->flags & UCT_EP_PARAM_FLAG_FAILOVER);
     self->log_path_mtu    = ucs_ilog2(uct_ib_mtu_value(IBV_MTU_4096));
     self->paused          = 0;
+    self->move_state      = UCT_RC_GDAKI_MOVE_STATE_NONE;
     uct_rc_gdaki_ep_reset_channels(self);
 
     if (self->failover) {
@@ -1774,6 +2410,7 @@ static uct_rc_iface_ops_t uct_rc_gdaki_internal_ops = {
             .ep_get_device_ep       = uct_rc_gdaki_ep_get_device_ep,
             .ep_outstanding_purge   = (uct_ep_outstanding_purge_func_t)ucs_empty_function_return_unsupported,
             .ep_failover_pause      = uct_rc_gdaki_ep_failover_pause,
+            .ep_failover_move       = uct_rc_gdaki_ep_failover_move,
             .ep_failover_fail       = uct_rc_gdaki_ep_failover_fail
         },
         .create_cq  = uct_rc_gdaki_create_cq,

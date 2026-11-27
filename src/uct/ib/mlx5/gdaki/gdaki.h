@@ -22,6 +22,11 @@
 typedef struct {
     uct_ib_mlx5_cq_t   cq;
     uct_ib_mlx5_txwq_t qp;
+    /* With failover, the ready WQE index when the channel was moved to
+     * another endpoint, and the WQE index on that endpoint after the moved
+     * WQEs, UINT64_MAX if none */
+    uint64_t           moved_ready;
+    uint64_t           moved_end;
 } uct_rc_gdaki_channel_t;
 
 typedef struct {
@@ -69,6 +74,15 @@ typedef struct uct_rc_gdaki_iface {
 } uct_rc_gdaki_iface_t;
 
 
+/* Progress of uct_ep_failover_move() */
+enum {
+    UCT_RC_GDAKI_MOVE_STATE_NONE,
+    UCT_RC_GDAKI_MOVE_STATE_PAUSING, /* Waiting for the device on to_ep */
+    UCT_RC_GDAKI_MOVE_STATE_POSTED,  /* Waiting for the moved WQEs */
+    UCT_RC_GDAKI_MOVE_STATE_DONE
+};
+
+
 typedef struct uct_rc_gdaki_ep {
     uct_base_ep_t                    super;
     uint8_t                          dev_ep_init;
@@ -78,8 +92,10 @@ typedef struct uct_rc_gdaki_ep {
     uint8_t                          failover;
     /* Log2 of the path MTU in bytes, set when connected */
     uint8_t                          log_path_mtu;
-    /* Paused by uct_ep_failover_pause(), until failed */
+    /* Paused by uct_ep_failover_pause(), until moved or failed */
     uint8_t                          paused;
+    /* Progress of uct_ep_failover_move() */
+    uint8_t                          move_state;
     uct_rc_gdaki_channel_block_mem_t mem;
     uct_rc_gdaki_channel_block_t     *channel_block;
     ucs_list_link_t                  list;
